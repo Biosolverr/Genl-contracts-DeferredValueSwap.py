@@ -358,4 +358,173 @@ class DeferredValueSwap(gl.Contract):
             raise UserError("Finalization deadline passed")
 
         deposit = self.deal_deposit.get(deal_id, u256(0))
-        if deposit ==
+        if deposit == u256(0):
+            raise UserError("No active deposit")
+
+        current_value = self.deal_current_value.get(deal_id, u256(0))
+        if current_value == u256(0):
+            raise UserError("No value to finalize")
+
+        transform_fee = (current_value * self.transform_fee_bps) // u256(10_000)
+        net_amount = current_value - transform_fee
+
+        if net_amount > u256(0):
+            self.protocol_fees_collected += transform_fee
+            self._send_native(self.deal_recipient[deal_id], net_amount)
+
+        self.deal_state[deal_id] = self._STATE_FINAL_STABLE()
+        self.deal_finalized_at[deal_id] = self._now()
+
+        r = self.deal_recipient[deal_id]
+        self.xp[r] = self.xp.get(r, u256(0)) + u256(5)
+        self.wins[r] = self.wins.get(r, u256(0)) + u256(1)
+
+        self.deal_deposit[deal_id] = u256(0)
+        return int(deal_id)
+
+    # =========================
+    # DISPUTE SYSTEM
+    # =========================
+
+    @gl.public.write
+    def open_dispute(self, deal_id_int: int, reason: str) -> None:
+        deal_id = u256(deal_id_int)
+        self._only_participant(deal_id)
+        self._not_blacklisted(gl.message.sender_address)
+        self._respect_delay(gl.message.sender_address)
+
+        state = self.deal_state.get(deal_id, u256(99))
+        if state != self._STATE_ACTIVE():
+            raise UserError("Deal not active")
+
+        if self.deal_dispute_open.get(deal_id, u256(0)) == u256(1):
+            raise UserError("Dispute already open")
+
+        now = self._now()
+        self.deal_dispute_open[deal_id] = u256(1)
+        self.deal_claim_by[deal_id] = gl.message.sender_address
+        self.deal_claim_reason[deal_id] = reason
+        self.deal_claim_opened_at[deal_id] = now
+        if self.dispute_period_sec > u256(0):
+            self.deal_claim_deadline[deal_id] = now + self.dispute_period_sec
+
+        self.deal_state[deal_id] = self._STATE_DISPUTED()
+
+    @gl.public.write
+    def challenge_dispute(self, deal_id_int: int, reason: str) -> None:
+        deal_id = u256(deal_id_int)
+        self._only_participant(deal_id)
+        self._not_blacklisted(gl.message.sender_address)
+        self._respect_delay(gl.message.sender_address)
+
+        if self.deal_dispute_open.get(deal_id, u256(0)) != u256(1):
+            raise UserError("No open dispute")
+
+        if self.deal_challenge_by.get(deal_id, Address.ZERO) != Address.ZERO:
+            raise UserError("Dispute already challenged")
+
+        self.deal_challenge_by[deal_id] = gl.message.sender_address
+        self.deal_challenge_reason[deal_id] = reason
+
+    @gl.public.write
+    def resolve_dispute(self, deal_id_int: int, mode: int, note: str) -> None:
+        deal_id = u256(deal_id_int)
+        self._only_owner()
+        state = self.deal_state.get(deal_id, u256(99))
+        if state != self._STATE_DISPUTED():
+            raise UserError("Not disputed")
+
+        self.deal_resolution_mode[deal_id] = u256(mode)
+        self.deal_resolution_note[deal_id] = note
+
+        # Simple resolution: revert to sender
+        deposit = self.deal_deposit.get(deal_id, u256(0))
+        if deposit > u256(0):
+            self._send_native(self.deal_sender[deal_id], deposit)
+        self.deal_state[deal_id] = self._STATE_CANCELLED()
+        self.deal_finalized_at[deal_id] = self._now()
+
+    # =========================
+    # CONFIG / ADMIN
+    # =========================
+
+    @gl.public.write
+    def set_timeouts(
+        self,
+        activation_period: int,
+        finalization_period: int,
+        dispute_period: int,
+        min_delay: int
+    ) -> None:
+        self._only_owner()
+        self.default_activation_period_sec = u256(activation_period)
+        self.default_finalization_period_sec = u256(finalization_period)
+        self.dispute_period_sec = u256(dispute_period)
+        self.min_delay_sec = u256(min_delay)
+
+    @gl.public.write
+    def set_fees(
+        self,
+        activation_fee: int,
+        transform_fee_bps: int,
+        multiplier_bps: int
+    ) -> None:
+        self._only_owner()
+        self.base_activation_fee = u256(activation_fee)
+        self.transform_fee_bps = u256(transform_fee_bps)
+        self.global_value_multiplier_bps = u256(multiplier_bps)
+
+    @gl.public.write
+    def set_limits(self, max_value: int) -> None:
+        self._only_owner()
+        self.max_deal_value = u256(max_value)
+
+    @gl.public.write
+    def blacklist(self, addr_hex: str, flag: int) -> None:
+        self._only_owner()
+        addr = Address(addr_hex)
+        self.blacklisted[addr] = u256(flag)
+
+    # =========================
+    # VIEW / QUERY
+    # =========================
+
+    @gl.public.view
+    def get_deal_info(self, deal_id_int: int) -> dict:
+        deal_id = u256(deal_id_int)
+        sender = self.deal_sender.get(deal_id)
+        recipient = self.deal_recipient.get(deal_id)
+        if sender is None or recipient is None:
+            raise UserError("Deal not found")
+        return {
+            "id": str(deal_id),
+            "sender": str(sender),
+            "recipient": str(recipient),
+            "state": str(self.deal_state.get(deal_id, u256(0))),
+            "initial_value": str(self.deal_initial_value.get(deal_id, u256(0))),
+            "current_value": str(self.deal_current_value.get(deal_id, u256(0))),
+            "created_at": str(self.deal_created_at.get(deal_id, u256(0))),
+            "activated_at": str(self.deal_activated_at.get(deal_id, u256(0))),
+            "finalized_at": str(self.deal_finalized_at.get(deal_id, u256(0))),
+            "offchain_ref": self.deal_offchain_ref.get(deal_id, ""),
+            "nft_metadata": self.deal_nft_metadata.get(deal_id, ""),
+            "dispute_open": str(self.deal_dispute_open.get(deal_id, u256(0))),
+            "claim_by": str(self.deal_claim_by.get(deal_id, Address.ZERO)),
+            "challenge_by": str(self.deal_challenge_by.get(deal_id, Address.ZERO)),
+        }
+
+    @gl.public.view
+    def get_stats(self, addr_hex: str) -> dict:
+        addr = Address(addr_hex)
+        return {
+            "xp": str(self.xp.get(addr, u256(0))),
+            "wins": str(self.wins.get(addr, u256(0))),
+        }
+
+    @gl.public.view
+    def get_contract_stats(self) -> dict:
+        return {
+            "total_deals": str(self.next_deal_id - u256(1)),
+            "protocol_fees": str(self.protocol_fees_collected),
+            "owner": str(self.owner),
+        }
