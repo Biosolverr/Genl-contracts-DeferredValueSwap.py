@@ -1,835 +1,142 @@
-Most escrow examples in the EVM world quickly turn into a small zoo of moving parts: a Solidity escrow contract, one or more ERC‑20/721 tokens, off‑chain services, 
-and an oracle layer that tells the chain what happened in the real world. Getting all of that right requires solid Solidity skills, custom infrastructure, 
-and a lot of glue code just to answer simple questions like “who is right in this dispute?” or “did the conditions actually happen?”. 
-Traditional smart contracts are also “blind” by design: they can’t read the web or interpret natural‑language evidence without those external oracle systems. (docs.genlayer.com medium.com)
-GenLayer’s Intelligent Contracts remove a lot of this complexity. You write the whole escrow lifecycle in Python, inside a single contract, 
-and you can plug in AI‑based dispute resolution and web data access directly through GenLayer’s non‑deterministic operations—without maintaining separate oracle infrastructure. 
-The same engine that holds the funds can read structured and unstructured evidence, run it through LLMs, and reach a verifiable, on‑chain decision through Optimistic Democracy consensus. 
-In practice, this means you can build an end‑to‑end escrow with subjective arbitration as one readable Python file, instead of a fragmented Solidity + oracles architecture. (genlayer.com docs.genlayer.com)
-Building an AI‑Powered Escrow Intelligent Contract on GenLayer This tutorial walks through a complete escrow‑style Intelligent Contract for GenLayer, step by step.
+DeferredValueSwap — AI-Powered Escrow on GenLayer
 
-We’ll:
+Complete tutorial with real tested values
 
-* lock native GEN in a deal between two parties,
-* define a clear lifecycle for that deal,
-* add timeouts and cancellations,
-* and plug in AI‑based dispute resolution using non‑deterministic execution. (docs.genlayer.com docs.genlayer.com)
 
-The final result is the DeferredValueSwap contract in this repository.
+1. What We Are Building
+DeferredValueSwap is a GenLayer intelligent contract for two-party escrow deals. Think of a freelance scenario:
 
-1. What We’re Building
-Think of a simple freelance job:
-
-* A client wants a website.
-* A freelancer wants to be sure they’ll get paid.
-* Neither side fully trusts the other.
+A client (account A) wants work done and is ready to pay
+A freelancer (account B) wants guaranteed payment
+Neither side fully trusts the other
 
 With this contract:
 
-1. The client (sender) creates a deal and deposits some GEN.
-2. The freelancer (recipient) activates the deal and does the work.
-3. At the end:
-
-if everything is fine, the freelancer finalizes and gets paid, or
-if there’s a conflict, either side can open a dispute.
-
-
-
-A dispute can then be:
-
-* resolved manually by the contract owner, or
-* resolved by an AI arbitrator that sees the context and returns a structured decision via GenLayer’s non‑deterministic operations. (docs.genlayer.com)
-
-That’s exactly what DeferredValueSwap does.
-
-2. Contract Skeleton and Imports
-The contract is a single Python class that extends gl.Contract.
-GenLayer uses a “magic comment” on the first lines to specify the SDK version. (docs.genlayer.com)
-pythonDownloadCopy code# v0.3.1
-# { "Depends": "py-genlayer:latest" }
-
-from genlayer import *
-import time
-import typing
-import json
-
-
-class DeferredValueSwap(gl.Contract):
-    """
-    Deferred-value deal/token contract on GenLayer.
-
-    - sender ↔ recipient
-    - lifecycle:
-        INACTIVE → ACTIVE → (FINAL_NFT | FINAL_STABLE | CANCELLED | DISPUTED)
-    - native GEN deposit locked at creation
-    - final outcome: payout to recipient (STABLE) or logical “NFT”-style completion
-    - safety: blacklist, value limits, action throttling
-    - optional dispute: claim/challenge + AI arbitration
-    - simple reputation (XP / wins)
-    """
-GenLayer contracts are just Python classes with:
-
-* type‑annotated storage fields (persisted on‑chain),
-* a regular __init__ constructor,
-* methods decorated with @gl.public.view, @gl.public.write, or @gl.public.write.payable. (docs.genlayer.com docs.genlayer.com)
-
-
-3. Modeling the Deal Lifecycle
-We model the lifecycle as integer states, using small helper methods so the code stays readable:
-pythonDownloadCopy code    def _STATE_INACTIVE(self) -> u256:
-        return u256(0)
-
-    def _STATE_ACTIVE(self) -> u256:
-        return u256(1)
-
-    def _STATE_FINAL_NFT(self) -> u256:
-        return u256(2)
-
-    def _STATE_FINAL_STABLE(self) -> u256:
-        return u256(3)
-
-    def _STATE_CANCELLED(self) -> u256:
-        return u256(4)
-
-    def _STATE_DISPUTED(self) -> u256:
-        return u256(5)
-Each deal goes through these possible stages:
-
-* INACTIVE – created and funded, but not yet activated.
-* ACTIVE – work in progress, deadlines ticking.
-* FINAL_NFT – finished as a certificate with metadata, no payout.
-* FINAL_STABLE – finished with payout to recipient.
-* CANCELLED – cancelled or expired; deposit refunded to sender.
-* DISPUTED – locked in a dispute until resolved.
-
-All other logic (timeouts, disputes, AI, fees) hangs off this state machine.
-
-4. Storage Layout: What We Keep On‑Chain
-We use typed fields and TreeMaps as GenLayer’s persistent storage primitives. (docs.genlayer.com)
-Key deal fields:
-pythonDownloadCopy code    # Deal identity and parties
-    next_deal_id: u256
-
-    deal_sender: TreeMap[u256, Address]
-    deal_recipient: TreeMap[u256, Address]
-    deal_state: TreeMap[u256, u256]
-
-    # Economics
-    deal_initial_value: TreeMap[u256, u256]   # nominal value in GEN
-    deal_current_value: TreeMap[u256, u256]   # after applying multiplier
-    deal_deposit: TreeMap[u256, u256]         # actual GEN locked as deposit
-
-    # Timestamps and deadlines
-    deal_created_at: TreeMap[u256, u256]
-    deal_activated_at: TreeMap[u256, u256]
-    deal_finalized_at: TreeMap[u256, u256]
-
-    deal_activation_deadline: TreeMap[u256, u256]
-    deal_finalization_deadline: TreeMap[u256, u256]
-
-    # Extra metadata
-    deal_offchain_ref: TreeMap[u256, str]
-    deal_nft_metadata: TreeMap[u256, str]
-Dispute‑related fields:
-pythonDownloadCopy code    deal_dispute_open: TreeMap[u256, u256]    # 0/1
-    deal_claim_by: TreeMap[u256, Address]
-    deal_claim_reason: TreeMap[u256, str]
-    deal_claim_opened_at: TreeMap[u256, u256]
-    deal_claim_deadline: TreeMap[u256, u256]
-
-    deal_challenge_by: TreeMap[u256, Address]
-    deal_challenge_reason: TreeMap[u256, str]
-
-    deal_resolution_mode: TreeMap[u256, u256] # 0=none,1=owner_manual,2=ai_judge
-    deal_resolution_note: TreeMap[u256, str]
-
-    dispute_period_sec: u256                  # global dispute window
-Global config and security:
-pythonDownloadCopy code    # Economics / fees
-    base_activation_fee: u256
-    global_value_multiplier_bps: u256   # 10000 = 1.0x
-    transform_fee_bps: u256             # fee on payout (FINAL_STABLE), in bps
-
-    protocol_fees_collected: u256
-
-    # Security
-    blacklisted: TreeMap[Address, u256] # 1 if blocked
-
-    max_deal_value: u256                # cap on deal value, 0 = no cap
-    min_delay_sec: u256                 # min delay between actions per address
-    last_action_at: TreeMap[Address, u256]
-
-    default_activation_period_sec: u256
-    default_finalization_period_sec: u256
-
-    # Reputation
-    xp: TreeMap[Address, u256]
-    wins: TreeMap[Address, u256]
-
-    # Admin
-    owner: Address
-This looks like a lot, but it’s mostly bookkeeping: parties, amounts, timestamps, and a few booleans.
-
-5. Constructor and Helper Methods
-We start with a few utility helpers:
-pythonDownloadCopy code    def _now(self) -> u256:
-        return u256(int(time.time()))
-
-    def _only_owner(self) -> None:
-        if gl.message.sender_address != self.owner:
-            raise UserError("Only owner")
-
-    def _not_blacklisted(self, addr: Address) -> None:
-        if self.blacklisted.get(addr, u256(0)) == u256(1):
-            raise UserError("Blacklisted")
-
-    def _respect_delay(self, addr: Address) -> None:
-        if self.min_delay_sec == u256(0):
-            return
-        last = self.last_action_at.get(addr, u256(0))
-        now = self._now()
-        if last != u256(0) and now < last + self.min_delay_sec:
-            raise UserError("Action too frequent")
-        self.last_action_at[addr] = now
-Participant checks:
-pythonDownloadCopy code    def _only_sender(self, deal_id: u256) -> None:
-        sender = self.deal_sender.get(deal_id)
-        if sender is None:
-            raise UserError("Unknown deal")
-        if sender != gl.message.sender_address:
-            raise UserError("Only sender")
-
-    def _only_recipient(self, deal_id: u256) -> None:
-        recipient = self.deal_recipient.get(deal_id)
-        if recipient is None:
-            raise UserError("Unknown deal")
-        if recipient != gl.message.sender_address:
-            raise UserError("Only recipient")
-
-    def _only_participant(self, deal_id: u256) -> None:
-        me = gl.message.sender_address
-        sender = self.deal_sender.get(deal_id)
-        recipient = self.deal_recipient.get(deal_id)
-
-        if sender is None:
-            raise UserError("Unknown deal")
-
-        if me != sender and me != recipient:
-            raise UserError("Only sender or recipient")
-A simple value multiplier (in case you want an interest‑like effect):
-pythonDownloadCopy code    def _calc_value(self, initial: u256) -> u256:
-        if self.global_value_multiplier_bps == u256(0):
-            return initial
-        return (initial * self.global_value_multiplier_bps) // u256(10_000)
-And a helper to send native GEN; GenLayer exposes balances and transfers through its standard library. (docs.genlayer.com)
-pythonDownloadCopy code    def _send_native(self, to: Address, amount: u256) -> None:
-        if amount == u256(0):
-            return
-        if self.balance < amount:
-            raise UserError("Contract balance insufficient")
-        proxy = gl.get_contract_at(to)
-        proxy.emit_transfer(value=amount)
-Finally, a JSON helper to be tolerant to AI outputs that might include ``` fences:
-pythonDownloadCopy code    def _parse_json(self, raw: str) -> typing.Any:
-        cleaned = raw.replace("```json", "").replace("```", "").strip()
-        return json.loads(cleaned)
-Constructor
-The constructor sets sensible defaults:
-pythonDownloadCopy code    def __init__(self):
-        self.next_deal_id = u256(1)
-        self.owner = gl.message.sender_address
-
-        self.base_activation_fee = u256(0)
-        self.global_value_multiplier_bps = u256(10_000)  # 1.0x
-        self.transform_fee_bps = u256(100)               # 1%
-
-        self.protocol_fees_collected = u256(0)
-
-        self.max_deal_value = u256(0)
-        self.min_delay_sec = u256(0)
-
-        self.default_activation_period_sec = u256(0)
-        self.default_finalization_period_sec = u256(0)
-
-        self.dispute_period_sec = u256(0)
-You can later adjust everything via admin methods.
-
-6. Creating and Funding a Deal
-Creation is @gl.public.write.payable because it:
-
-* modifies storage, and
-* requires the sender to send GEN as value. (docs.genlayer.com)
-
-pythonDownloadCopy code    @gl.public.write.payable
-    def create_deal(
-        self,
-        recipient_hex: str,
-        value: int,
-        offchain_ref: str,
-    ) -> int:
-        sender = gl.message.sender_address
-        self._not_blacklisted(sender)
-        self._respect_delay(sender)
-
-        if value <= 0:
-            raise UserError("Value must be > 0")
-
-        v = u256(value)
-        if self.max_deal_value != u256(0) and v > self.max_deal_value:
-            raise UserError("Value exceeds max_deal_value")
-
-        recipient = Address(recipient_hex)
-        self._not_blacklisted(recipient)
-
-        sent = gl.message.value
-        fee = self.base_activation_fee
-        expected = v + fee
-        if sent != expected:
-            raise UserError("Sent value must equal value + base_activation_fee")
-
-        deposit = v
-        if fee > u256(0):
-            self.protocol_fees_collected += fee
-Here:
-
-* value becomes the deposit.
-* base_activation_fee is collected as protocol revenue.
-
-Then we allocate a new deal_id and write everything to storage:
-pythonDownloadCopy code        deal_id = self.next_deal_id
-        self.next_deal_id = deal_id + u256(1)
-
-        now = self._now()
-
-        self.deal_sender[deal_id] = sender
-        self.deal_recipient[deal_id] = recipient
-        self.deal_state[deal_id] = self._STATE_INACTIVE()
-
-        self.deal_initial_value[deal_id] = v
-        self.deal_current_value[deal_id] = self._calc_value(v)
-        self.deal_deposit[deal_id] = deposit
-
-        self.deal_created_at[deal_id] = now
-        self.deal_offchain_ref[deal_id] = offchain_ref
-
-        if self.default_activation_period_sec > u256(0):
-            self.deal_activation_deadline[deal_id] = now + self.default_activation_period_sec
-        else:
-            self.deal_activation_deadline[deal_id] = u256(0)
-
-        self.deal_finalization_deadline[deal_id] = u256(0)
-
-        self.xp[sender] = self.xp.get(sender, u256(0)) + u256(1)
-
-        return int(deal_id)
-offchain_ref can be any string (for example, a link to a spec, Figma, IPFS hash, etc.).
-
-7. Activating and Expiring Deals
-Activation
-Either party can activate the deal:
-pythonDownloadCopy code    @gl.public.write
-    def activate_deal(self, deal_id_int: int) -> None:
-        deal_id = u256(deal_id_int)
-        self._only_participant(deal_id)
-        self._not_blacklisted(gl.message.sender_address)
-        self._respect_delay(gl.message.sender_address)
-
-        state = self.deal_state.get(deal_id, u256(99))
-        if state != self._STATE_INACTIVE():
-            raise UserError("Deal not inactive")
-
-        deadline = self.deal_activation_deadline.get(deal_id, u256(0))
-        if deadline != u256(0) and self._now() > deadline:
-            raise UserError("Activation deadline passed")
-If everything is fine, we set the deal to ACTIVE and optionally set a finalization deadline:
-pythonDownloadCopy code        self.deal_state[deal_id] = self._STATE_ACTIVE()
-        now = self._now()
-        self.deal_activated_at[deal_id] = now
-
-        if self.default_finalization_period_sec > u256(0):
-            self.deal_finalization_deadline[deal_id] = now + self.default_finalization_period_sec
-
-        s = self.deal_sender[deal_id]
-        r = self.deal_recipient[deal_id]
-        self.xp[s] = self.xp.get(s, u256(0)) + u256(1)
-        self.xp[r] = self.xp.get(r, u256(0)) + u256(1)
-Cancellation Before Activation
-The sender can cancel an inactive deal and get their deposit back:
-pythonDownloadCopy code    @gl.public.write
-    def cancel_inactive(self, deal_id_int: int) -> None:
-        deal_id = u256(deal_id_int)
-        self._only_sender(deal_id)
-        self._not_blacklisted(gl.message.sender_address)
-        self._respect_delay(gl.message.sender_address)
-
-        state = self.deal_state.get(deal_id, u256(99))
-        if state != self._STATE_INACTIVE():
-            raise UserError("Deal not inactive")
-
-        deposit = self.deal_deposit.get(deal_id, u256(0))
-        if deposit > u256(0):
-            self.deal_deposit[deal_id] = u256(0)
-            self._send_native(self.deal_sender[deal_id], deposit)
-
-        self.deal_state[deal_id] = self._STATE_CANCELLED()
-        self.deal_finalized_at[deal_id] = self._now()
-Expiry by Deadlines
-Either party can expire a deal if deadlines are missed:
-pythonDownloadCopy code    @gl.public.write
-    def expire_deal(self, deal_id_int: int) -> None:
-        deal_id = u256(deal_id_int)
-        self._only_participant(deal_id)
-        self._not_blacklisted(gl.message.sender_address)
-        self._respect_delay(gl.message.sender_address)
-
-        state = self.deal_state.get(deal_id, u256(99))
-        now = self._now()
-
-        if state == self._STATE_INACTIVE():
-            deadline = self.deal_activation_deadline.get(deal_id, u256(0))
-            if deadline == u256(0) or now <= deadline:
-                raise UserError("Activation deadline not passed")
-        elif state == self._STATE_ACTIVE():
-            deadline = self.deal_finalization_deadline.get(deal_id, u256(0))
-            if deadline == u256(0) or now <= deadline:
-                raise UserError("Finalization deadline not passed")
-        else:
-            raise UserError("Not expirable state")
-
-        deposit = self.deal_deposit.get(deal_id, u256(0))
-        if deposit > u256(0):
-            self.deal_deposit[deal_id] = u256(0)
-            self._send_native(self.deal_sender[deal_id], deposit)
-
-        self.deal_state[deal_id] = self._STATE_CANCELLED()
-        self.deal_finalized_at[deal_id] = now
-This covers the “ghosted” or abandoned deal scenario.
-
-8. Finalization: Payout vs “NFT‑Style” Certificate
-There are two ways to finalize an ACTIVE deal.
-8.1. Finalize to Certificate (NFT‑like)
-The recipient marks the deal as completed with some metadata, without moving the deposit:
-pythonDownloadCopy code    @gl.public.write
-    def finalize_to_nft(self, deal_id_int: int, metadata: str) -> None:
-        deal_id = u256(deal_id_int)
-        self._only_recipient(deal_id)
-        self._not_blacklisted(gl.message.sender_address)
-        self._respect_delay(gl.message.sender_address)
-
-        state = self.deal_state.get(deal_id, u256(99))
-        if state != self._STATE_ACTIVE():
-            raise UserError("Deal not active")
-
-        deadline = self.deal_finalization_deadline.get(deal_id, u256(0))
-        if deadline != u256(0) and self._now() > deadline:
-            raise UserError("Finalization deadline passed")
-
-        self.deal_state[deal_id] = self._STATE_FINAL_NFT()
-        self.deal_nft_metadata[deal_id] = metadata
-        self.deal_finalized_at[deal_id] = self._now()
-
-        r = self.deal_recipient[deal_id]
-        self.xp[r] = self.xp.get(r, u256(0)) + u256(5)
-        self.wins[r] = self.wins.get(r, u256(0)) + u256(1)
-Here metadata can be JSON: { "description": "...", "links": [...] }, etc.
-8.2. Finalize to Stable (Payout)
-The more typical path: recipient gets paid, protocol takes a fee:
-pythonDownloadCopy code    @gl.public.write
-    def finalize_to_stable(self, deal_id_int: int) -> int:
-        deal_id = u256(deal_id_int)
-        self._only_recipient(deal_id)
-        self._not_blacklisted(gl.message.sender_address)
-        self._respect_delay(gl.message.sender_address)
-
-        state = self.deal_state.get(deal_id, u256(99))
-        if state != self._STATE_ACTIVE():
-            raise UserError("Deal not active")
-
-        deadline = self.deal_finalization_deadline.get(deal_id, u256(0))
-        if deadline != u256(0) and self._now() > deadline:
-            raise UserError("Finalization deadline passed")
-
-        deposit = self.deal_deposit.get(deal_id, u256(0))
-        if deposit == u256(0):
-            raise UserError("No deposit")
-We compute the fee and send the net amount to the recipient:
-pythonDownloadCopy code        fee = (deposit * self.transform_fee_bps) // u256(10_000)
-        if fee > deposit:
-            fee = deposit
-
-        net = deposit - fee
-        if net == u256(0):
-            raise UserError("Net amount is zero")
-
-        recipient = self.deal_recipient[deal_id]
-
-        self.deal_state[deal_id] = self._STATE_FINAL_STABLE()
-        self.deal_finalized_at[deal_id] = self._now()
-        self.deal_current_value[deal_id] = net
-        self.deal_deposit[deal_id] = u256(0)
-
-        self._send_native(recipient, net)
-        self.protocol_fees_collected += fee
-
-        self.xp[recipient] = self.xp.get(recipient, u256(0)) + u256(5)
-        self.wins[recipient] = self.wins.get(recipient, u256(0)) + u256(1)
-
-        return int(net)
-
-9. Disputes: Claim, Challenge, and AI Resolution
-Now for the fun part: AI‑backed dispute resolution.
-9.1. Opening and Challenging a Dispute
-Either participant can open a dispute:
-pythonDownloadCopy code    @gl.public.write
-    def open_dispute(self, deal_id_int: int, reason: str) -> None:
-        deal_id = u256(deal_id_int)
-        self._only_participant(deal_id)
-        self._not_blacklisted(gl.message.sender_address)
-        self._respect_delay(gl.message.sender_address)
-
-        if self.dispute_period_sec == u256(0):
-            raise UserError("Disputes disabled")
-
-        state = self.deal_state.get(deal_id, u256(99))
-        if state not in (self._STATE_INACTIVE(), self._STATE_ACTIVE()):
-            raise UserError("Dispute only for inactive/active deals")
-
-        if self.deal_dispute_open.get(deal_id, u256(0)) == u256(1):
-            raise UserError("Dispute already open")
-
-        if reason.strip() == "":
-            raise UserError("Empty reason")
-
-        now = self._now()
-        self.deal_dispute_open[deal_id] = u256(1)
-        self.deal_state[deal_id] = self._STATE_DISPUTED()
-        self.deal_claim_by[deal_id] = gl.message.sender_address
-        self.deal_claim_reason[deal_id] = reason
-        self.deal_claim_opened_at[deal_id] = now
-        self.deal_claim_deadline[deal_id] = now + self.dispute_period_sec
-The other side can challenge with their own explanation:
-pythonDownloadCopy code    @gl.public.write
-    def challenge_dispute(self, deal_id_int: int, reason: str) -> None:
-        deal_id = u256(deal_id_int)
-        self._only_participant(deal_id)
-        self._not_blacklisted(gl.message.sender_address)
-        self._respect_delay(gl.message.sender_address)
-
-        if self.deal_dispute_open.get(deal_id, u256(0)) != u256(1):
-            raise UserError("No open dispute")
-
-        if reason.strip() == "":
-            raise UserError("Empty reason")
-
-        claim_by = self.deal_claim_by.get(deal_id)
-        if claim_by is None:
-            raise UserError("Internal error: no claim_by")
-        if claim_by == gl.message.sender_address:
-            raise UserError("Claimant cannot challenge themselves")
-
-        if self.deal_challenge_by.get(deal_id) is not None:
-            raise UserError("Challenge already set")
-
-        self.deal_challenge_by[deal_id] = gl.message.sender_address
-        self.deal_challenge_reason[deal_id] = reason
-At this point, the dispute is open, both sides have written their positions on‑chain, and the deal is in DISPUTED state.
-9.2. AI Arbitrator: Non‑Deterministic Block
-We encapsulate AI decision‑making in a private helper:
-pythonDownloadCopy code    def _ai_resolve_dispute(self, deal_id: u256) -> str:
-        sender = self.deal_sender[deal_id]
-        recipient = self.deal_recipient[deal_id]
-        offref = self.deal_offchain_ref.get(deal_id, "")
-        claim_by = self.deal_claim_by.get(deal_id)
-        claim_reason = self.deal_claim_reason.get(deal_id, "")
-        challenge_by = self.deal_challenge_by.get(deal_id)
-        challenge_reason = self.deal_challenge_reason.get(deal_id, "")
-        deposit = self.deal_deposit.get(deal_id, u256(0))
-
-        info = {
-            "deal_id": int(deal_id),
-            "sender": sender.as_hex,
-            "recipient": None if recipient is None else recipient.as_hex,
-            "offchain_ref": offref,
-            "claim_by": None if claim_by is None else claim_by.as_hex,
-            "claim_reason": claim_reason,
-            "challenge_by": None if challenge_by is None else challenge_by.as_hex,
-            "challenge_reason": challenge_reason,
-            "deposit": int(deposit),
-        }
-We build a task prompt for the AI:
-pythonDownloadCopy code        task = (
-            "You are an AI arbitrator for a GenLayer deferred-value deal.\n"
-            "Choose ONE of two outcomes:\n"
-            "- \"sender_refund\": fully refund deposit to the sender.\n"
-            "- \"release_to_recipient\": release deposit to the recipient.\n\n"
-            "Return STRICT JSON:\n"
-            "{\"decision\": \"sender_refund\"|\"release_to_recipient\", "
-            "\"explanation\": \"...\"}\n"
-            "No markdown, no ``` fences."
-        )
-Then we define a leader function and a validator function, and pass them into gl._nondet.
-This is GenLayer’s API for safe non‑deterministic operations, backed by the equivalence principle and Optimistic Democracy. (docs.genlayer.com docs.genlayer.com)
-pythonDownloadCopy code        def leader() -> str:
-            res = _prompt(task + "\n\n" + json.dumps(info))
-            return str(res)
-
-        def validator(result) -> bool:
-            try:
-                raw = result.value  # type: ignore[attr-defined]
-            except Exception:
-                return False
-            try:
-                data = self._parse_json(str(raw))
-            except Exception:
-                return False
-
-            decision = data.get("decision")
-            expl = data.get("explanation")
-            if not isinstance(decision, str) or not isinstance(expl, str):
-                return False
-            if decision not in ["sender_refund", "release_to_recipient"]:
-                return False
-            if len(expl) == 0 or len(expl) > 500:
-                return False
-            return True
-
-        out = gl._nondet(leader, validator)
-        data = self._parse_json(str(out))
-        decision = str(data["decision"])
-        explanation = str(data.get("explanation", ""))
-
-        self.deal_resolution_note[deal_id] = explanation
-        return decision
-
-* leader() can call arbitrary AI tools (here, _prompt),
-* validator() checks the shape and sanity of the result,
-* gl._nondet coordinates validators to reach consensus on a valid result. (docs.genlayer.com)
-
-9.3. Applying the AI Decision
-The owner triggers AI‑based resolution after the dispute window closes:
-pythonDownloadCopy code    @gl.public.write
-    def resolve_dispute_ai(self, deal_id_int: int) -> None:
-        self._only_owner()
-        deal_id = u256(deal_id_int)
-
-        if self.deal_dispute_open.get(deal_id, u256(0)) != u256(1):
-            raise UserError("No open dispute")
-
-        deadline = self.deal_claim_deadline.get(deal_id, u256(0))
-        if deadline != u256(0) and self._now() <= deadline:
-            raise UserError("Dispute window not closed")
-
-        decision = self._ai_resolve_dispute(deal_id)
-        deposit = self.deal_deposit.get(deal_id, u256(0))
-
-        sender = self.deal_sender[deal_id]
-        recipient = self.deal_recipient[deal_id]
-Two possible outcomes:
-pythonDownloadCopy code        if decision == "sender_refund":
-            if deposit > u256(0):
-                self.deal_deposit[deal_id] = u256(0)
-                self._send_native(sender, deposit)
-            self.deal_state[deal_id] = self._STATE_CANCELLED()
-            self.wins[sender] = self.wins.get(sender, u256(0)) + u256(1)
-            self.xp[sender] = self.xp.get(sender, u256(0)) + u256(5)
-        else:
-            if deposit > u256(0):
-                self.deal_deposit[deal_id] = u256(0)
-                self._send_native(recipient, deposit)
-            self.deal_state[deal_id] = self._STATE_FINAL_STABLE()
-            self.deal_current_value[deal_id] = deposit
-            self.wins[recipient] = self.wins.get(recipient, u256(0)) + u256(1)
-            self.xp[recipient] = self.xp.get(recipient, u256(0)) + u256(5)
-
-        self.deal_finalized_at[deal_id] = self._now()
-        self.deal_dispute_open[deal_id] = u256(0)
-        self.deal_resolution_mode[deal_id] = u256(2)
-We also have a manual path for the owner:
-pythonDownloadCopy code    @gl.public.write
-    def resolve_dispute_owner(self, deal_id_int: int, send_to_recipient: bool, note: str) -> None:
-        self._only_owner()
-        deal_id = u256(deal_id_int)
-
-        if self.deal_dispute_open.get(deal_id, u256(0)) != u256(1):
-            raise UserError("No open dispute")
-
-        deposit = self.deal_deposit.get(deal_id, u256(0))
-        sender = self.deal_sender[deal_id]
-        recipient = self.deal_recipient[deal_id]
-
-        if send_to_recipient:
-            if deposit > u256(0):
-                self.deal_deposit[deal_id] = u256(0)
-                self._send_native(recipient, deposit)
-            self.deal_state[deal_id] = self._STATE_FINAL_STABLE()
-            self.deal_current_value[deal_id] = deposit
-            self.wins[recipient] = self.wins.get(recipient, u256(0)) + u256(1)
-            self.xp[recipient] = self.xp.get(recipient, u256(0)) + u256(5)
-        else:
-            if deposit > u256(0):
-                self.deal_deposit[deal_id] = u256(0)
-                self._send_native(sender, deposit)
-            self.deal_state[deal_id] = self._STATE_CANCELLED()
-            self.wins[sender] = self.wins.get(sender, u256(0)) + u256(1)
-            self.xp[sender] = self.xp.get(sender, u256(0)) + u256(5)
-
-        self.deal_finalized_at[deal_id] = self._now()
-        self.deal_dispute_open[deal_id] = u256(0)
-        self.deal_resolution_mode[deal_id] = u256(1)
-        self.deal_resolution_note[deal_id] = note
-So you get two resolution modes:
-
-* resolution_mode = 1 → manual owner decision,
-* resolution_mode = 2 → AI‑based decision.
-
-
-10. Admin Controls and View Functions
-Admin methods let the owner tune the contract:
-pythonDownloadCopy code    @gl.public.write
-    def set_blacklist(self, addr_hex: str, blocked: bool) -> None:
-        self._only_owner()
-        addr = Address(addr_hex)
-        self.blacklisted[addr] = u256(1 if blocked else 0)
-
-    @gl.public.write
-    def set_security_params(self, max_value: int, min_delay_seconds: int) -> None:
-        self._only_owner()
-        if max_value < 0 or min_delay_seconds < 0:
-            raise UserError("Must be >= 0")
-        self.max_deal_value = u256(max_value)
-        self.min_delay_sec = u256(min_delay_seconds)
-
-    @gl.public.write
-    def set_timeouts(self, activation_sec: int, finalization_sec: int, dispute_sec: int) -> None:
-        self._only_owner()
-        if activation_sec < 0 or finalization_sec < 0 or dispute_sec < 0:
-            raise UserError("Must be >= 0")
-        self.default_activation_period_sec = u256(activation_sec)
-        self.default_finalization_period_sec = u256(finalization_sec)
-        self.dispute_period_sec = u256(dispute_sec)
-
-    @gl.public.write
-    def set_economics(self, activation_fee: int, multiplier_bps: int, transform_fee_bps: int) -> None:
-        self._only_owner()
-        if activation_fee < 0 or multiplier_bps <= 0 or transform_fee_bps < 0:
-            raise UserError("Invalid params")
-        if transform_fee_bps > 2000:
-            raise UserError("Fee too high (>20%)")
-
-        self.base_activation_fee = u256(activation_fee)
-        self.global_value_multiplier_bps = u256(multiplier_bps)
-        self.transform_fee_bps = u256(transform_fee_bps)
-And withdrawing collected protocol fees:
-pythonDownloadCopy code    @gl.public.write
-    def withdraw_protocol_fees(self, to_hex: str, amount: int) -> None:
-        self._only_owner()
-        if amount <= 0:
-            raise UserError("amount must be > 0")
-        a = u256(amount)
-        if a > self.protocol_fees_collected:
-            raise UserError("Amount exceeds protocol_fees_collected")
-
-        to = Address(to_hex)
-        self.protocol_fees_collected -= a
-        self._send_native(to, a)
-Read‑only views help frontends and tools:
-pythonDownloadCopy code    @gl.public.view
-    def get_deal(self, deal_id_int: int) -> dict[str, typing.Any]:
-        deal_id = u256(deal_id_int)
-        s = self.deal_sender.get(deal_id)
-        r = self.deal_recipient.get(deal_id)
-        if s is None:
-            raise UserError("Unknown deal")
-        return {
-            "id": deal_id_int,
-            "sender": s.as_hex,
-            "recipient": r.as_hex if r is not None else None,
-            "state": int(self.deal_state.get(deal_id, u256(255))),
-            "initial_value": int(self.deal_initial_value.get(deal_id, u256(0))),
-            "current_value": int(self.deal_current_value.get(deal_id, u256(0))),
-            "deposit": int(self.deal_deposit.get(deal_id, u256(0))),
-            "created_at": int(self.deal_created_at.get(deal_id, u256(0))),
-            "activated_at": int(self.deal_activated_at.get(deal_id, u256(0))),
-            "finalized_at": int(self.deal_finalized_at.get(deal_id, u256(0))),
-            "activation_deadline": int(self.deal_activation_deadline.get(deal_id, u256(0))),
-            "finalization_deadline": int(self.deal_finalization_deadline.get(deal_id, u256(0))),
-            "offchain_ref": self.deal_offchain_ref.get(deal_id, ""),
-            "nft_metadata": self.deal_nft_metadata.get(deal_id, ""),
-            "dispute_open": int(self.deal_dispute_open.get(deal_id, u256(0))),
-            "claim_by": None if self.deal_claim_by.get(deal_id) is None else self.deal_claim_by[deal_id].as_hex,
-            "claim_reason": self.deal_claim_reason.get(deal_id, ""),
-            "claim_deadline": int(self.deal_claim_deadline.get(deal_id, u256(0))),
-            "challenge_by": None if self.deal_challenge_by.get(deal_id) is None else self.deal_challenge_by[deal_id].as_hex,
-            "challenge_reason": self.deal_challenge_reason.get(deal_id, ""),
-            "resolution_mode": int(self.deal_resolution_mode.get(deal_id, u256(0))),
-            "resolution_note": self.deal_resolution_note.get(deal_id, ""),
-        }
-
-    @gl.public.view
-    def get_my_xp(self) -> int:
-        return int(self.xp.get(gl.message.sender_address, u256(0)))
-
-    @gl.public.view
-    def get_xp(self, addr_hex: str) -> int:
-        addr = Address(addr_hex)
-        return int(self.xp.get(addr, u256(0)))
-
-    @gl.public.view
-    def get_wins(self, addr_hex: str) -> int:
-        addr = Address(addr_hex)
-        return int(self.wins.get(addr, u256(0)))
-
-    @gl.public.view
-    def get_config(self) -> dict[str, typing.Any]:
-        return {
-            "base_activation_fee": int(self.base_activation_fee),
-            "global_value_multiplier_bps": int(self.global_value_multiplier_bps),
-            "transform_fee_bps": int(self.transform_fee_bps),
-            "max_deal_value": int(self.max_deal_value),
-            "min_delay_sec": int(self.min_delay_sec),
-            "default_activation_period_sec": int(self.default_activation_period_sec),
-            "default_finalization_period_sec": int(self.default_finalization_period_sec),
-            "dispute_period_sec": int(self.dispute_period_sec),
-            "protocol_fees_collected": int(self.protocol_fees_collected),
-        }
-
-11. Running the Contract in GenLayer Studio
-To try this out:
-
-1. Open GenLayer Studio in your browser. (docs.genlayer.com)
-2. Create a new Python Intelligent Contract.
-3. Paste the full contents of DeferredValueSwap.py from this repo.
-4. Deploy it (the constructor takes no parameters).
-5. Use Studio’s UI to call methods:
-
-Happy path scenario:
-
-* As the owner, call set_economics and set_timeouts.
-* From account A:
-
-call create_deal(recipient_hex=B, value=..., offchain_ref=...) with value + base_activation_fee as value.
-
-
-* From account B:
-
-call activate_deal(deal_id).
-later call finalize_to_stable(deal_id) or finalize_to_nft(deal_id, metadata).
-
-
-
-Dispute scenario:
-
-* Follow steps up to activate_deal.
-* One side calls open_dispute(deal_id, "Short reason").
-* The other side calls challenge_dispute(deal_id, "Counter‑argument").
-* After the dispute window ends, owner calls resolve_dispute_ai(deal_id) or resolve_dispute_owner(...).
-* Inspect get_deal(deal_id) to see final state and resolution_note.
-
-From here you can:
-
-* fork the contract and adapt deadlines, fees, and reputation,
-* plug it into a dApp frontend using the GenLayer JS/PY SDKs, (docs.genlayer.com)
-* or use it as a template for other escrow‑style workflows on GenLayer.
-
-This tutorial is intentionally focused on one concrete, realistic pattern: two‑party escrow with AI arbitration, 
-so you can see how to combine standard contract logic with GenLayer’s Intelligent features in a way that actually maps to real‑world use cases.
+A creates a deal and locks GEN on the contract
+B activates the deal and does the work
+If everything is fine — B gets paid via finalize_to_stable
+If there is a conflict — either side opens a dispute, the owner resolves it
+
+
+💡 The contract is written in Python and deployed as a single file. No oracles, no Solidity.
+
+
+2. Deal Lifecycle
+Every deal moves through states. These numeric values appear in get_deal_info:
+#StateDescription0INACTIVECreated and funded, not yet activated1ACTIVEWork in progress2FINAL_NFTCompleted as a certificate (no payout)3FINAL_STABLECompleted with payout to recipient4CANCELLEDCancelled or expired, deposit returned to sender5DISPUTEDFrozen in dispute until resolved
+State transition diagram:
+create_deal
+    |
+INACTIVE ---(cancel_inactive)---> CANCELLED
+    |
+activate_deal
+    |
+ ACTIVE ---(finalize_to_stable)---> FINAL_STABLE
+    |    ---(finalize_to_nft)------> FINAL_NFT
+    |    ---(open_dispute)----------> DISPUTED
+    |
+ DISPUTED ---(resolve_dispute)-----> CANCELLED
+
+3. Setup Before Tests (OWNER)
+After deployment the contract uses zero defaults. Run these two methods as the owner before any test.
+
+⚠️ All amounts are in wei. 1 GEN = 1,000,000,000,000,000,000 (10¹⁸) wei.
+
+Step 1 — set_fees [OWNER account]
+FieldValueactivation_fee1000000000000000000 (1 GEN)transform_fee_bps100 (1%)multiplier_bps10000 (1.0x, no change)
+Click Send Transaction
+Step 2 — set_timeouts [OWNER account]
+FieldValueactivation_period0 (no deadline)finalization_period0 (no deadline)dispute_period600 (10 minutes)min_delay0 (no throttle)
+Click Send Transaction
+
+4. Test 1 — Happy Path
+Scenario: A creates a deal, B activates it and receives payment.
+Step 1.1 — create_deal [Account A — client]
+FieldValuerecipient_hex(address of account B)value1offchain_reftest_job_1Value (GEN)11 (= 10 deposit + 1 activation_fee)
+Click Send Transaction
+
+💡 The deposit is determined by the Value (GEN) field, not the value argument.
+deposit = Value (GEN) − activation_fee → 11 − 1 = 10 GEN
+
+Step 1.2 — activate_deal [Account B — freelancer]
+FieldValuedeal_id_int1
+Click Send Transaction
+Step 1.3 — finalize_to_stable [Account B — freelancer]
+FieldValuedeal_id_int1
+Click Send Transaction
+Expected result:
+
+B receives ~9.9 GEN (10 minus 1% transform_fee)
+0.1 GEN goes to protocol_fees
+state = 3 (FINAL_STABLE)
+B gets +5 XP and +1 win
+
+
+5. Test 2 — Cancellation
+Scenario: A creates a deal, then cancels it before B activates.
+Step 2.1 — create_deal [Account A — client]
+FieldValuerecipient_hex(address of account B)value1offchain_refcancel_testValue (GEN)6 (= 5 deposit + 1 activation_fee)
+Click Send Transaction
+Step 2.2 — cancel_inactive [Account A — client]
+FieldValuedeal_id_int2
+Click Send Transaction
+Expected result:
+
+A gets back 5 GEN (the deposit)
+1 GEN activation_fee is not refunded
+state = 4 (CANCELLED)
+
+
+6. Test 3 — Dispute
+Scenario: A creates a deal, B activates it, A opens a dispute, B responds, owner resolves.
+Step 3.1 — create_deal [Account A — client]
+FieldValuerecipient_hex(address of account B)value1offchain_refdispute_testValue (GEN)21 (= 20 deposit + 1 activation_fee)
+Click Send Transaction
+Step 3.2 — activate_deal [Account B — freelancer]
+FieldValuedeal_id_int3
+Click Send Transaction
+Step 3.3 — open_dispute [Account A — client]
+FieldValuedeal_id_int3reasonfreelancer did not deliver the work
+Click Send Transaction
+Step 3.4 — challenge_dispute [Account B — freelancer]
+FieldValuedeal_id_int3reasonwork delivered and client confirmed
+Click Send Transaction
+
+⏳ Wait 10 minutes (dispute_period = 600 sec) before the next step.
+
+Step 3.5 — resolve_dispute [OWNER account]
+FieldValuedeal_id_int3mode1 (owner_manual)noteai arbitration
+Click Send Transaction
+
+ℹ️ mode=1 is a manual owner decision. In the current version the deposit always returns to the sender (A). mode=2 is reserved for future AI arbitration.
+
+Expected result:
+
+20 GEN deposit returned to account A
+state = 4 (CANCELLED)
+deal_resolution_mode = 1
+deal_resolution_note = ai arbitration
+
+
+7. Verifying Results
+After each test call get_deal_info to inspect the final state:
+get_deal_info [any account]
+FieldValuedeal_id_int1 / 2 / 3
+Expected state values:
+Deal IDstateWhat happened13 — FINAL_STABLEB received payment24 — CANCELLEDA got deposit back34 — CANCELLEDDispute resolved, funds returned to A
+
+8. Method Reference
+Admin methods (owner only)
+MethodDescriptionset_feesSet activation_fee, transform_fee_bps, multiplier_bpsset_timeoutsSet activation, finalization, dispute periods and min_delayset_limitsSet max_deal_value (0 = no limit)blacklistBlock or unblock an addressresolve_disputeResolve a dispute
+User methods
+MethodWhoDescriptioncreate_dealAnyoneCreate a deal and lock depositactivate_dealA or BMove deal to ACTIVEcancel_inactiveACancel before activation, refund depositexpire_dealA or BExpire by deadlinefinalize_to_stableBComplete with payout to Bfinalize_to_nftBComplete as certificate (no payout)open_disputeA or BOpen a disputechallenge_disputeA or BRespond to a dispute
+View methods
+MethodReturnsget_deal_info(deal_id_int)Full deal data: state, parties, timestamps, dispute infoget_stats(addr_hex)XP and wins for an addressget_contract_stats()Total deals, protocol fees collected, owner address
+
+9. Bugs Fixed in This Version
+The following issues were discovered and fixed during live testing on GenLayer Studio:
+
+UserError not imported — added a compatibility shim at the top of the contract
+Address.ZERO does not exist — replaced with .get() is not None checks
+create_deal strict value match — reworked: deposit = msg.value − fee, the value argument is no longer used for deposit calculation
+Fractional GEN rejected (1e-17 BigInt error) — Value (GEN) field is now the source of truth for deposit amount
