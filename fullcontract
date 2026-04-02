@@ -6,6 +6,12 @@ import time
 import typing
 import json
 
+try:
+    UserError
+except NameError:
+    class UserError(Exception):
+        pass
+
 
 class DeferredValueSwap(gl.Contract):
     """AI-Powered Escrow on GenLayer (tutorial-complete)"""
@@ -195,18 +201,22 @@ class DeferredValueSwap(gl.Contract):
         if value <= 0:
             raise UserError("Value must be > 0")
 
-        v = u256(value)
-        if self.max_deal_value != u256(0) and v > self.max_deal_value:
-            raise UserError("Value exceeds max_deal_value")
-
         recipient = Address(recipient_hex)
         self._not_blacklisted(recipient)
 
         sent = gl.message.value
         fee = self.base_activation_fee
-        expected = v + fee
-        if sent != expected:
-            raise UserError("Sent value must equal value + base_activation_fee")
+        if sent < fee:
+            raise UserError("Sent value must cover base_activation_fee")
+
+        # deposit = whatever was sent minus the fee
+        deposit = sent - fee
+
+        if deposit == u256(0):
+            raise UserError("Deposit must be > 0")
+
+        if self.max_deal_value != u256(0) and deposit > self.max_deal_value:
+            raise UserError("Deposit exceeds max_deal_value")
 
         if fee > u256(0):
             self.protocol_fees_collected += fee
@@ -219,9 +229,9 @@ class DeferredValueSwap(gl.Contract):
         self.deal_recipient[deal_id] = recipient
         self.deal_state[deal_id] = self._STATE_INACTIVE()
 
-        self.deal_initial_value[deal_id] = v
-        self.deal_current_value[deal_id] = self._calc_value(v)
-        self.deal_deposit[deal_id] = v
+        self.deal_initial_value[deal_id] = deposit
+        self.deal_current_value[deal_id] = self._calc_value(deposit)
+        self.deal_deposit[deal_id] = deposit
 
         self.deal_created_at[deal_id] = now
         self.deal_offchain_ref[deal_id] = offchain_ref
@@ -420,7 +430,7 @@ class DeferredValueSwap(gl.Contract):
         if self.deal_dispute_open.get(deal_id, u256(0)) != u256(1):
             raise UserError("No open dispute")
 
-        if self.deal_challenge_by.get(deal_id, Address.ZERO) != Address.ZERO:
+        if self.deal_challenge_by.get(deal_id) is not None:
             raise UserError("Dispute already challenged")
 
         self.deal_challenge_by[deal_id] = gl.message.sender_address
@@ -509,8 +519,8 @@ class DeferredValueSwap(gl.Contract):
             "offchain_ref": self.deal_offchain_ref.get(deal_id, ""),
             "nft_metadata": self.deal_nft_metadata.get(deal_id, ""),
             "dispute_open": str(self.deal_dispute_open.get(deal_id, u256(0))),
-            "claim_by": str(self.deal_claim_by.get(deal_id, Address.ZERO)),
-            "challenge_by": str(self.deal_challenge_by.get(deal_id, Address.ZERO)),
+            "claim_by": str(self.deal_claim_by.get(deal_id) or "0x0000000000000000000000000000000000000000"),
+            "challenge_by": str(self.deal_challenge_by.get(deal_id) or "0x0000000000000000000000000000000000000000"),
         }
 
     @gl.public.view
