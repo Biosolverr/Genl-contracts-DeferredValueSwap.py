@@ -1,318 +1,87 @@
-DeferredValueSwap Intelligent Contract
-Overview
-DeferredValueSwap is an escrow‑style Intelligent Contract on GenLayer that manages deferred‑value deals between a sender and a recipient.
+Contract Idea in One Paragraph
+Two parties want to do a deal — for example, a freelance job or a product sale. 
+The sender locks GEN in the contract as a deposit. The recipient can activate and later finalize the deal, 
+either by taking a payout (funds released to them) or a certificate (logical NFT-like state with metadata). 
+If something goes wrong, either side can open a dispute. 
+It can be resolved manually by the contract owner or automatically by an AI arbitrator that reads the deal context and returns a structured decision.
 
-* The sender locks native GEN tokens as a deposit.
-* The deal goes through a full lifecycle: creation → activation → finalization (payout or certificate) or cancellation/expiry.
-* Optional dispute resolution can be handled either by a manual admin decision or by AI‑based arbitration using GenLayer’s non‑deterministic operations. (docs.genlayer.com)
-
-It is designed as a generic building block for marketplaces, freelancing platforms, and any two‑party agreements that need deposits, deadlines, and rich dispute logic.
+Repository Structure
+.
+├── contracts/
+│   └── DeferredValueSwap.py   # Full Intelligent Contract source
+├── TUTORIAL.md                # Step-by-step guide with real tested values
+└── README.md                  # You are here
 
 Roles
-Sender
-Creates the deal and funds the initial deposit.
-Recipient
-Counterparty who will either receive the funds (payout) or a final “certificate” of completion.
-Owner
-Contract administrator who:
-
-* configures fees, limits, and timeouts;
-* manages the blacklist;
-* resolves disputes manually or via AI;
-* withdraws accumulated protocol fees.
-
+RoleDescriptionSenderCreates the deal and funds the depositRecipientReceives the payout or the certificate upon 
+completionOwnerContract admin — configures fees, resolves disputes, withdraws protocol fees
 
 Deal Lifecycle
-Each deal has a unique deal_id and one of the following states:
-
-1. 
-INACTIVE
-Created and funded, but not yet activated.
-
-2. 
-ACTIVE
-Both sides have acknowledged the start (via activation).
-Work, shipment, or off‑chain obligation is in progress.
-
-3. 
-FINAL_NFT
-Finalized as a certificate (“NFT‑like” logical state) with metadata.
-The deposit remains locked (extendable by future logic).
-
-4. 
-FINAL_STABLE
-Finalized as a payout:
-
-commission is extracted,
-net amount is sent to the recipient.
-
-
-5. 
-CANCELLED
-Deal ended without payout:
-
-deposit is fully returned to the sender.
-
-
-6. 
-DISPUTED
-A dispute is open; final decision is pending (owner / AI).
-
-
-State Transitions
-
-* 
-Creation:
-NONE → INACTIVE
-
-* 
-Activation:
-INACTIVE → ACTIVE
-
-* 
-Finalization:
-
-ACTIVE → FINAL_NFT (certificate)
-ACTIVE → FINAL_STABLE (payout)
-
-
-* 
-Cancellation / Expiry:
-
-INACTIVE → CANCELLED
-ACTIVE → CANCELLED (expired)
-
-
-* 
-Disputes:
-
-INACTIVE / ACTIVE → DISPUTED → (CANCELLED | FINAL_STABLE)
-
-
-
+create_deal
+    |
+INACTIVE ---(cancel_inactive)---> CANCELLED
+    |
+activate_deal
+    |
+ ACTIVE ---(finalize_to_stable)---> FINAL_STABLE  (payout to recipient)
+    |    ---(finalize_to_nft)------> FINAL_NFT     (certificate)
+    |    ---(open_dispute)----------> DISPUTED
+    |
+ DISPUTED ---(resolve_dispute_owner / resolve_dispute_ai)---> CANCELLED | FINAL_STABLE
+States
+#StateDescription0INACTIVECreated and funded, not yet activated1ACTIVEWork in progress2FINAL_NFTCompleted 
+as a certificate (no payout)3FINAL_STABLECompleted with payout to recipient4CANCELLEDCancelled or expired, 
+deposit returned to sender5DISPUTEDFrozen in dispute until resolved
 
 Economic Model
-Deposit (deal_deposit)
-Locked GEN amount equal to the value passed at deal creation.
-Activation Fee (base_activation_fee)
-Additional GEN amount paid by the sender at creation:
+ParameterDescriptiondeal_depositGEN locked at creation, equal to sent value minus activation_feebase_activation_feeOne-time fee paid by sender at creation, 
+goes to protocol revenueglobal_value_multiplier_bpsMultiplier applied to logical current value (10000 = 1.0x)transform_fee_bpsCommission taken on finalize_to_stable payout (e.g. 100 = 1%)
 
-* not part of the deposit;
-* collected as protocol revenue.
-
-Value Multiplier (global_value_multiplier_bps)
-Global multiplier (in basis points) applied to the logical current value:
-
-* current_value = initial_value * multiplier_bps / 10_000.
-
-Transform Fee (transform_fee_bps)
-Percentage commission taken only when finalizing to payout via finalize_to_stable:
-
-* net = deposit − fee is sent to the recipient;
-* fee is retained in protocol_fees_collected.
-
-
-Security & Governance Features
-Blacklist (blacklisted)
-
-* Owner can block specific addresses from interacting with the contract.
-
-Max Deal Value (max_deal_value)
-
-* Upper bound on initial deposit per deal.
-* 0 means “no limit”.
-
-Action Throttling (min_delay_sec)
-
-* Minimal delay between actions from the same address, to mitigate spam and abusive behavior.
-
-Timeouts
-
-* activation_deadline: optional maximum time to activate a deal after creation.
-* finalization_deadline: optional maximum time to finalize after activation.
-* dispute_period_sec: time window for dispute challenge and AI/manual resolution scheduling.
-
-Protocol Fees Withdrawal
-
-* Owner can withdraw accumulated fees from protocol_fees_collected to a chosen address.
+⚠️ All amounts are in wei. 1 GEN = 10¹⁸ wei.
 
 
 Dispute Resolution
-Opening and Challenging Disputes
-open_dispute(deal_id, reason)
+Either party can open a dispute while the deal is INACTIVE or ACTIVE. 
+The other side can respond with a counter-argument. After the dispute window closes, the owner resolves it via one of two paths:
+Manual — resolve_dispute_owner(deal_id, send_to_recipient, note)
+The owner decides who gets the funds and records a note.
+AI — resolve_dispute_ai(deal_id)
+An LLM arbitrator receives the full deal context (parties, deposit, both sides' reasons, off-chain reference) and returns a structured JSON decision:
 
-* Allowed states: INACTIVE or ACTIVE.
-* Marks the deal as DISPUTED, and stores:
-
-initiator address,
-textual reason,
-dispute deadline.
-
-
-
-challenge_dispute(deal_id, reason)
-
-* Must be called by the other party, not the claimant.
-* Stores:
-
-challenger address,
-challenger’s textual reason.
-
-
-
-Resolution Options
-1. Manual Resolution by Owner
-resolve_dispute_owner(deal_id, send_to_recipient, note)
-
-* 
-If send_to_recipient = true:
-
-deposit → recipient,
-state → FINAL_STABLE,
-current_value is updated to the paid amount.
-
-
-* 
-Else:
-
-deposit → sender,
-state → CANCELLED.
-
-
-
-In both cases:
-
-* resolution note is stored in deal_resolution_note;
-* basic reputation counters are updated (xp, wins).
-
-2. AI‑Based Resolution
-resolve_dispute_ai(deal_id)
-After the dispute window closes, the owner can invoke the AI path:
-
-* Private _ai_resolve_dispute:
-
-builds a structured JSON context (parties, deposit, reasons, off‑chain reference, etc.);
-calls a non‑deterministic LLM‑backed block via gl._nondet, validated under GenLayer’s equivalence principle. (docs.genlayer.com docs.genlayer.com)
-
-
-
-The AI returns strict JSON with:
-
-* decision: "sender_refund" or "release_to_recipient",
-* explanation: short human‑readable reasoning.
-
-The contract then executes:
-
-* 
-sender_refund
-→ refund full deposit to sender,
-→ state → CANCELLED.
-
-* 
-release_to_recipient
-→ send full deposit to recipient,
-→ state → FINAL_STABLE.
-
-
-The explanation is stored in deal_resolution_note.
-
-Reputation System
-Two per‑address counters:
-xp[address]
-Accumulates “experience” for actions such as:
-
-* creating and activating deals,
-* successfully finishing deals,
-* being on the winning side of disputes.
-
-wins[address]
-Counts successful outcomes (for example, finalizations in their favor).
-These are read‑only signals that do not affect contract logic directly, but can be used off‑chain or by higher‑level protocols as trust/reputation metrics.
+json{
+  "decision": "sender_refund" | "release_to_recipient",
+  "explanation": "..."
+}
+The explanation is stored on-chain in deal_resolution_note.
 
 Public Interface
 Deal Management
-create_deal(recipient_hex: str, value: int, offchain_ref: str) -> int
+MethodWhoDescriptioncreate_deal(recipient_hex, value, offchain_ref)AnyoneCreate deal, 
+lock deposit — payableactivate_deal(deal_id)Sender or RecipientMove to ACTIVEcancel_inactive(deal_id)SenderCancel before activation, 
+refund depositexpire_deal(deal_id)Sender or RecipientExpire by missed deadlinefinalize_to_stable(deal_id)RecipientPayout to recipient, 
+collect feefinalize_to_nft(deal_id, metadata)RecipientComplete as certificate
 
-* payable: must send value + base_activation_fee in GEN.
-* Creates a new INACTIVE deal and returns deal_id.
+Disputes
+MethodDescriptionopen_dispute(deal_id, reason)Open a disputechallenge_dispute(deal_id, 
+reason)Respond to a disputeresolve_dispute_ai(deal_id)AI arbitration (owner only)resolve_dispute_owner(deal_id, send_to_recipient, note)Manual resolution (owner only)
 
-activate_deal(deal_id: int)
+Admin
+MethodDescriptionset_economics(activation_fee, multiplier_bps, transform_fee_bps)Set feesset_timeouts(activation_sec, 
+finalization_sec, dispute_sec)Set deadlinesset_security_params(max_value, min_delay_seconds)Set limitsset_blacklist(addr_hex, 
+blocked)Block/unblock addresswithdraw_protocol_fees(to_hex, amount)Withdraw collected fees
 
-* Can be called by sender or recipient.
-* Checks activation_deadline (if set).
-* Sets finalization_deadline if configured.
-* Transitions INACTIVE → ACTIVE.
+View
+MethodReturnsget_deal(deal_id)Full deal data: state, parties, amounts, timestamps, dispute infoget_config()Current fees, limits, 
+timeouts, collected feesget_xp(addr_hex)XP for an addressget_wins(addr_hex)Win count for an addressget_my_xp()XP for the caller
 
-cancel_inactive(deal_id: int)
+Reputation System
+Each address accumulates xp and wins counters based on actions (creating deals, activating, finalizing, winning disputes). 
+These are read-only signals — they don't affect contract logic but can be used by off-chain systems as trust metrics.
 
-* Sender only.
-* Allowed only when state is INACTIVE.
-* Refunds the full deposit to the sender.
-* State → CANCELLED.
+Getting Started
 
-expire_deal(deal_id: int)
-
-* Sender or recipient.
-* If activation_deadline (for INACTIVE) or finalization_deadline (for ACTIVE) has passed:
-
-refunds deposit to sender,
-state → CANCELLED.
-
-
-
-finalize_to_nft(deal_id: int, metadata: str)
-
-* Recipient only.
-* State must be ACTIVE, and within finalization_deadline if set.
-* State → FINAL_NFT.
-* Stores arbitrary metadata string (e.g., JSON with links, description, etc.).
-
-finalize_to_stable(deal_id: int) -> int
-
-* Recipient only.
-* State must be ACTIVE, and within finalization_deadline.
-* Applies transform_fee_bps:
-
-sends deposit − fee to recipient,
-retains fee in protocol_fees_collected,
-state → FINAL_STABLE.
-
-
-* Returns net payout as int.
-
-
-Dispute Functions
-
-* open_dispute(deal_id: int, reason: str)
-* challenge_dispute(deal_id: int, reason: str)
-* resolve_dispute_ai(deal_id: int)
-* resolve_dispute_owner(deal_id: int, send_to_recipient: bool, note: str)
-
-
-Admin / Configuration
-
-* set_blacklist(addr_hex: str, blocked: bool)
-* set_security_params(max_value: int, min_delay_seconds: int)
-* set_timeouts(activation_sec: int, finalization_sec: int, dispute_sec: int)
-* set_economics(activation_fee: int, multiplier_bps: int, transform_fee_bps: int)
-* withdraw_protocol_fees(to_hex: str, amount: int)
-
-
-View Functions
-
-* 
-get_deal(deal_id: int) -> dict
-Returns full structured information about a deal: participants, state, amounts, timestamps, deadlines, dispute data, resolution data, and metadata.
-
-* 
-get_my_xp() -> int
-
-* 
-get_xp(addr_hex: str) -> int
-
-* 
-get_wins(addr_hex: str) -> int
-
-* 
-get_config() -> dict
-Returns current global configuration (fees, limits, timeouts, collected fees).
+Open GenLayer Studio
+Create a new Python Intelligent Contract
+Paste the contents of contracts/DeferredValueSwap.py
+Deploy (no constructor arguments needed)
+Follow TUTORIAL.md for the full walkthrough
