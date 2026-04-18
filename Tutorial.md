@@ -1,30 +1,97 @@
 DeferredValueSwap — AI-Powered Escrow on GenLayer
+Overview
 
-Complete tutorial with real tested values
+This tutorial demonstrates how to build and test a Deferred Value Swap — an intelligent escrow system designed for AI-driven execution on GenLayer.
 
+It enables two parties to interact without trust:
 
-1. What We Are Building
-DeferredValueSwap is a GenLayer intelligent contract for two-party escrow deals. Think of a freelance scenario:
+A client locks funds
+A freelancer completes work
+The contract enforces execution
+Disputes can be resolved (with future AI arbitration support)
+⚡ Quickstart (5 Minutes)
+Goal
 
-A client (account A) wants work done and is ready to pay
-A freelancer (account B) wants guaranteed payment
-Neither side fully trusts the other
+Create a deal → activate it → finalize → recipient gets paid
 
-With this contract:
+Result: funds move from locked escrow → recipient
 
-A creates a deal and locks GEN on the contract
-B activates the deal and does the work
-If everything is fine — B gets paid via finalize_to_stable
-If there is a conflict — either side opens a dispute, the owner resolves it
+Step 1 — Create Deal
 
+(Account A — client)
 
-💡 The contract is written in Python and deployed as a single file. No oracles, no Solidity.
+recipient: address of B
+Value: 11 GEN
 
+Result:
 
-2. Deal Lifecycle
-Every deal moves through states. These numeric values appear in get_deal_info:
-#StateDescription0INACTIVECreated and funded, not yet activated1ACTIVEWork in progress2FINAL_NFTCompleted as a certificate (no payout)3FINAL_STABLECompleted with payout to recipient4CANCELLEDCancelled or expired, deposit returned to sender5DISPUTEDFrozen in dispute until resolved
-State transition diagram:
+10 GEN = deposit
+1 GEN = activation fee
+Step 2 — Activate Deal
+
+(Account B — freelancer)
+
+deal becomes ACTIVE
+Step 3 — Finalize
+
+(Account B)
+
+Call:
+
+finalize_to_stable
+✅ Expected Result
+B receives ~9.9 GEN
+0.1 GEN goes to protocol fees
+Deal state = FINAL_STABLE (3)
+What You Are Building
+
+A full escrow system with:
+
+Deposits
+Activation flow
+Finalization
+Cancellation
+Dispute resolution
+🤖 AI / GenLayer Component
+
+This contract is designed for AI-driven execution on GenLayer.
+
+It aligns with GenLayer principles:
+
+Intelligent execution
+Off-chain reasoning
+AI-assisted decision workflows
+Current Implementation
+mode = 1 → manual dispute resolution
+Planned (GenLayer-native)
+mode = 2 → AI arbitration
+Off-chain inference decides outcome
+Autonomous execution via AI layer
+🧠 Why Python (GenLayer Advantage)
+
+Unlike Solidity systems, this contract is written in Python.
+
+This enables:
+
+Easier AI integration
+Flexible condition logic
+Native compatibility with off-chain reasoning
+Future AI-driven execution
+
+This is a key advantage of GenLayer’s execution model.
+
+Deal Lifecycle
+
+Each deal has a state:
+
+State	Name	Description
+0	INACTIVE	Created but not activated
+1	ACTIVE	Work in progress
+2	FINAL_NFT	Completed without payout
+3	FINAL_STABLE	Completed with payout
+4	CANCELLED	Cancelled or refunded
+5	DISPUTED	Under dispute
+Flow
 create_deal
     |
 INACTIVE ---(cancel_inactive)---> CANCELLED
@@ -36,107 +103,176 @@ activate_deal
     |    ---(open_dispute)----------> DISPUTED
     |
  DISPUTED ---(resolve_dispute)-----> CANCELLED
+Setup (Owner)
 
-3. Setup Before Tests (OWNER)
-After deployment the contract uses zero defaults. Run these two methods as the owner before any test.
+Before running tests:
 
-⚠️ All amounts are in wei. 1 GEN = 1,000,000,000,000,000,000 (10¹⁸) wei.
+set_fees
+Field	Value
+activation_fee	1 GEN
+transform_fee_bps	100 (1%)
+multiplier_bps	10000
+set_timeouts
+Field	Value
+activation_period	0
+finalization_period	0
+dispute_period	600 sec
+min_delay	0
+🧪 Test 1 — Happy Path
+Scenario
 
-Step 1 — set_fees [OWNER account]
-FieldValueactivation_fee1000000000000000000 (1 GEN)transform_fee_bps100 (1%)multiplier_bps10000 (1.0x, no change)
-Click Send Transaction
-Step 2 — set_timeouts [OWNER account]
-FieldValueactivation_period0 (no deadline)finalization_period0 (no deadline)dispute_period600 (10 minutes)min_delay0 (no throttle)
-Click Send Transaction
+Client pays → freelancer completes → gets paid
 
-4. Test 1 — Happy Path
-Scenario: A creates a deal, B activates it and receives payment.
-Step 1.1 — create_deal [Account A — client]
-FieldValuerecipient_hex(address of account B)value1offchain_reftest_job_1Value (GEN)11 (= 10 deposit + 1 activation_fee)
-Click Send Transaction
+Step 1 — create_deal (A)
+Value: 11 GEN
+offchain_ref: test_job_1
 
-💡 The deposit is determined by the Value (GEN) field, not the value argument.
-deposit = Value (GEN) − activation_fee → 11 − 1 = 10 GEN
+Deposit:
 
-Step 1.2 — activate_deal [Account B — freelancer]
-FieldValuedeal_id_int1
-Click Send Transaction
-Step 1.3 — finalize_to_stable [Account B — freelancer]
-FieldValuedeal_id_int1
-Click Send Transaction
-Expected result:
-
-B receives ~9.9 GEN (10 minus 1% transform_fee)
-0.1 GEN goes to protocol_fees
+10 GEN (after fee)
+Step 2 — activate_deal (B)
+Step 3 — finalize_to_stable (B)
+✅ Result
+B receives ~9.9 GEN
+Protocol gets 0.1 GEN
 state = 3 (FINAL_STABLE)
-B gets +5 XP and +1 win
+🧪 Test 2 — Cancellation
+Scenario
 
+Client cancels before activation
 
-5. Test 2 — Cancellation
-Scenario: A creates a deal, then cancels it before B activates.
-Step 2.1 — create_deal [Account A — client]
-FieldValuerecipient_hex(address of account B)value1offchain_refcancel_testValue (GEN)6 (= 5 deposit + 1 activation_fee)
-Click Send Transaction
-Step 2.2 — cancel_inactive [Account A — client]
-FieldValuedeal_id_int2
-Click Send Transaction
-Expected result:
-
-A gets back 5 GEN (the deposit)
-1 GEN activation_fee is not refunded
+Step 1 — create_deal (A)
+Value: 6 GEN
+Step 2 — cancel_inactive (A)
+✅ Result
+A receives 5 GEN
+Fee not refunded
 state = 4 (CANCELLED)
+🧪 Test 3 — Dispute
+Scenario
 
+Conflict between client and freelancer
 
-6. Test 3 — Dispute
-Scenario: A creates a deal, B activates it, A opens a dispute, B responds, owner resolves.
-Step 3.1 — create_deal [Account A — client]
-FieldValuerecipient_hex(address of account B)value1offchain_refdispute_testValue (GEN)21 (= 20 deposit + 1 activation_fee)
-Click Send Transaction
-Step 3.2 — activate_deal [Account B — freelancer]
-FieldValuedeal_id_int3
-Click Send Transaction
-Step 3.3 — open_dispute [Account A — client]
-FieldValuedeal_id_int3reasonfreelancer did not deliver the work
-Click Send Transaction
-Step 3.4 — challenge_dispute [Account B — freelancer]
-FieldValuedeal_id_int3reasonwork delivered and client confirmed
-Click Send Transaction
+Step 1 — create_deal (A)
+Value: 21 GEN
+Step 2 — activate_deal (B)
+Step 3 — open_dispute (A)
 
-⏳ Wait 10 minutes (dispute_period = 600 sec) before the next step.
+Reason:
 
-Step 3.5 — resolve_dispute [OWNER account]
-FieldValuedeal_id_int3mode1 (owner_manual)noteai arbitration
-Click Send Transaction
+freelancer did not deliver the work
+Step 4 — challenge_dispute (B)
 
-ℹ️ mode=1 is a manual owner decision. In the current version the deposit always returns to the sender (A). mode=2 is reserved for future AI arbitration.
+Reason:
 
-Expected result:
-
-20 GEN deposit returned to account A
+work delivered and client confirmed
+Step 5 — resolve_dispute (OWNER)
+mode = 1
+note = manual resolution (AI arbitration planned in mode=2)
+✅ Result
+20 GEN returned to A
 state = 4 (CANCELLED)
-deal_resolution_mode = 1
-deal_resolution_note = ai arbitration
+Verifying Results
 
+Call:
 
-7. Verifying Results
-After each test call get_deal_info to inspect the final state:
-get_deal_info [any account]
-FieldValuedeal_id_int1 / 2 / 3
-Expected state values:
-Deal IDstateWhat happened13 — FINAL_STABLEB received payment24 — CANCELLEDA got deposit back34 — CANCELLEDDispute resolved, funds returned to A
+get_deal_info(deal_id)
+Expected
+Deal	State	Result
+1	3	Payment success
+2	4	Cancelled
+3	4	Dispute resolved
+Methods Overview
+Admin
+set_fees
+set_timeouts
+resolve_dispute
+User
+create_deal
+activate_deal
+finalize_to_stable
+cancel_inactive
+open_dispute
+challenge_dispute
+View
+get_deal_info
+get_stats
+get_contract_stats
+Known Fixes
 
-8. Method Reference
-Admin methods (owner only)
-MethodDescriptionset_feesSet activation_fee, transform_fee_bps, multiplier_bpsset_timeoutsSet activation, finalization, dispute periods and min_delayset_limitsSet max_deal_value (0 = no limit)blacklistBlock or unblock an addressresolve_disputeResolve a dispute
-User methods
-MethodWhoDescriptioncreate_dealAnyoneCreate a deal and lock depositactivate_dealA or BMove deal to ACTIVEcancel_inactiveACancel before activation, refund depositexpire_dealA or BExpire by deadlinefinalize_to_stableBComplete with payout to Bfinalize_to_nftBComplete as certificate (no payout)open_disputeA or BOpen a disputechallenge_disputeA or BRespond to a dispute
-View methods
-MethodReturnsget_deal_info(deal_id_int)Full deal data: state, parties, timestamps, dispute infoget_stats(addr_hex)XP and wins for an addressget_contract_stats()Total deals, protocol fees collected, owner address
+During testing:
 
-9. Bugs Fixed in This Version
-The following issues were discovered and fixed during live testing on GenLayer Studio:
+Fixed missing UserError
+Removed invalid Address.ZERO usage
+Fixed deposit calculation logic
+Resolved fractional GEN issue
+🖥 Example Output (GenLayer Studio)
+After create_deal
+Tx Status: ACCEPTED
 
-UserError not imported — added a compatibility shim at the top of the contract
-Address.ZERO does not exist — replaced with .get() is not None checks
-create_deal strict value match — reworked: deposit = msg.value − fee, the value argument is no longer used for deposit calculation
-Fractional GEN rejected (1e-17 BigInt error) — Value (GEN) field is now the source of truth for deposit amount
+Method: create_deal
+Args:
+  recipient: 0xB...
+  value: 1
+  offchain_ref: test_job_1
+
+Value Sent: 11 GEN
+
+Result:
+  deal_id: 1
+  state: INACTIVE (0)
+  deposit: 10 GEN
+  activation_fee: 1 GEN
+After activate_deal
+Tx Status: ACCEPTED
+
+Method: activate_deal
+Args:
+  deal_id: 1
+
+Result:
+  state: ACTIVE (1)
+  activated_by: 0xB...
+After finalize_to_stable
+Tx Status: ACCEPTED
+
+Method: finalize_to_stable
+Args:
+  deal_id: 1
+
+Result:
+  state: FINAL_STABLE (3)
+  payout_to: 0xB...
+  amount: 9.9 GEN
+  protocol_fee: 0.1 GEN
+📸 Optional Screenshot
+
+You can include a real screenshot from GenLayer Studio:
+
+![GenLayer Studio Result](./assets/genlayer-result.png)
+
+Recommended:
+
+create_deal transaction
+finalize_to_stable result
+get_deal_info output
+💡 Why This Matters
+
+This tutorial demonstrates:
+
+end-to-end reproducible execution
+escrow logic with deterministic states
+AI-ready architecture design
+
+This is a foundation for AI-powered execution systems on GenLayer.
+
+Conclusion
+
+You built an escrow system that:
+
+Locks value securely
+Executes conditionally
+Handles disputes
+Prepares for AI arbitration
+
+This is a real foundation for AI-powered contracts on GenLayer.
