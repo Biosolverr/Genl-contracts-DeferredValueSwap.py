@@ -1,45 +1,23 @@
-# v0.3.1
-# { "Depends": "py-genlayer:latest" }
+# { "Depends": "py-genlayer:1jb45aa8ynh2a9c9xn3b7qqh8sm5q93hwfp7jqmwsfhh8jpz09h6" }
 
 from genlayer import *
 import time
-import typing
 import json
 
-try:
-    UserError
-except NameError:
-    class UserError(Exception):
+
+@gl.evm.contract_interface
+class _EOARecipient:
+    class View:
+        pass
+    class Write:
         pass
 
 
 class DeferredValueSwap(gl.Contract):
-    """AI-Powered Escrow on GenLayer (tutorial-complete)"""
+    """AI-Powered Escrow on GenLayer"""
 
     # =========================
-    # 1) STATES
-    # =========================
-
-    def _STATE_INACTIVE(self) -> u256:
-        return u256(0)
-
-    def _STATE_ACTIVE(self) -> u256:
-        return u256(1)
-
-    def _STATE_FINAL_NFT(self) -> u256:
-        return u256(2)
-
-    def _STATE_FINAL_STABLE(self) -> u256:
-        return u256(3)
-
-    def _STATE_CANCELLED(self) -> u256:
-        return u256(4)
-
-    def _STATE_DISPUTED(self) -> u256:
-        return u256(5)
-
-    # =========================
-    # 2) STORAGE
+    # STORAGE
     # =========================
 
     next_deal_id: u256
@@ -72,7 +50,7 @@ class DeferredValueSwap(gl.Contract):
     deal_challenge_by: TreeMap[u256, Address]
     deal_challenge_reason: TreeMap[u256, str]
 
-    deal_resolution_mode: TreeMap[u256, u256]  # 0=none,1=owner_manual,2=ai_judge
+    deal_resolution_mode: TreeMap[u256, u256]
     deal_resolution_note: TreeMap[u256, str]
 
     dispute_period_sec: u256
@@ -100,70 +78,15 @@ class DeferredValueSwap(gl.Contract):
     owner: Address
 
     # =========================
-    # HELPERS
+    # STATE CONSTANTS (as plain ints, not methods)
     # =========================
 
-    def _now(self) -> u256:
-        return u256(int(time.time()))
-
-    def _only_owner(self) -> None:
-        if gl.message.sender_address != self.owner:
-            raise UserError("Only owner")
-
-    def _not_blacklisted(self, addr: Address) -> None:
-        if self.blacklisted.get(addr, u256(0)) == u256(1):
-            raise UserError("Blacklisted")
-
-    def _respect_delay(self, addr: Address) -> None:
-        if self.min_delay_sec == u256(0):
-            return
-        last = self.last_action_at.get(addr, u256(0))
-        now = self._now()
-        if last != u256(0) and now < last + self.min_delay_sec:
-            raise UserError("Action too frequent")
-        self.last_action_at[addr] = now
-
-    def _only_sender(self, deal_id: u256) -> None:
-        sender = self.deal_sender.get(deal_id)
-        if sender is None:
-            raise UserError("Unknown deal")
-        if sender != gl.message.sender_address:
-            raise UserError("Only sender")
-
-    def _only_recipient(self, deal_id: u256) -> None:
-        recipient = self.deal_recipient.get(deal_id)
-        if recipient is None:
-            raise UserError("Unknown deal")
-        if recipient != gl.message.sender_address:
-            raise UserError("Only recipient")
-
-    def _only_participant(self, deal_id: u256) -> None:
-        me = gl.message.sender_address
-        sender = self.deal_sender.get(deal_id)
-        recipient = self.deal_recipient.get(deal_id)
-        if sender is None:
-            raise UserError("Unknown deal")
-        if me != sender and me != recipient:
-            raise UserError("Only sender or recipient")
-
-    def _calc_value(self, initial: u256) -> u256:
-        if self.global_value_multiplier_bps == u256(0):
-            return initial
-        return (initial * self.global_value_multiplier_bps) // u256(10_000)
-
-    # NOTE: this is the same transfer helper as in the tutorial text.
-    # If payouts fail in your environment, the issue is usually the runtime transfer primitive.
-    def _send_native(self, to: Address, amount: u256) -> None:
-        if amount == u256(0):
-            return
-        if self.balance < amount:
-            raise UserError("Contract balance insufficient")
-        proxy = gl.get_contract_at(to)
-        proxy.emit_transfer(value=amount)
-
-    def _parse_json(self, raw: str) -> typing.Any:
-        cleaned = raw.replace("```json", "").replace("```", "").strip()
-        return json.loads(cleaned)
+    STATE_INACTIVE  = 0
+    STATE_ACTIVE    = 1
+    STATE_FINAL_NFT = 2
+    STATE_FINAL_STABLE = 3
+    STATE_CANCELLED = 4
+    STATE_DISPUTED  = 5
 
     # =========================
     # CONSTRUCTOR
@@ -178,15 +101,68 @@ class DeferredValueSwap(gl.Contract):
         self.transform_fee_bps = u256(100)               # 1%
 
         self.protocol_fees_collected = u256(0)
-
         self.max_deal_value = u256(0)
         self.min_delay_sec = u256(0)
-
-        # Tutorial default is often 0; you can tune these later via set_timeouts().
         self.default_activation_period_sec = u256(0)
         self.default_finalization_period_sec = u256(0)
-
         self.dispute_period_sec = u256(0)
+
+    # =========================
+    # PRIVATE HELPERS
+    # =========================
+
+    def _now(self) -> u256:
+        return u256(int(time.time()))
+
+    def _only_owner(self) -> None:
+        if gl.message.sender_address != self.owner:
+            raise gl.vm.UserError("Only owner")
+
+    def _not_blacklisted(self, addr: Address) -> None:
+        if self.blacklisted.get(addr, u256(0)) == u256(1):
+            raise gl.vm.UserError("Blacklisted")
+
+    def _respect_delay(self, addr: Address) -> None:
+        if self.min_delay_sec == u256(0):
+            return
+        last = self.last_action_at.get(addr, u256(0))
+        now = self._now()
+        if last != u256(0) and now < last + self.min_delay_sec:
+            raise gl.vm.UserError("Action too frequent")
+        self.last_action_at[addr] = now
+
+    def _only_sender(self, deal_id: u256) -> None:
+        sender = self.deal_sender.get(deal_id)
+        if sender is None:
+            raise gl.vm.UserError("Unknown deal")
+        if sender != gl.message.sender_address:
+            raise gl.vm.UserError("Only sender")
+
+    def _only_recipient(self, deal_id: u256) -> None:
+        recipient = self.deal_recipient.get(deal_id)
+        if recipient is None:
+            raise gl.vm.UserError("Unknown deal")
+        if recipient != gl.message.sender_address:
+            raise gl.vm.UserError("Only recipient")
+
+    def _only_participant(self, deal_id: u256) -> None:
+        me = gl.message.sender_address
+        sender = self.deal_sender.get(deal_id)
+        recipient = self.deal_recipient.get(deal_id)
+        if sender is None:
+            raise gl.vm.UserError("Unknown deal")
+        if me != sender and me != recipient:
+            raise gl.vm.UserError("Only sender or recipient")
+
+    def _calc_value(self, initial: u256) -> u256:
+        if self.global_value_multiplier_bps == u256(0):
+            return initial
+        return (initial * self.global_value_multiplier_bps) // u256(10_000)
+
+    def _send_native(self, to: Address, amount: u256) -> None:
+        if amount == u256(0):
+            return
+        _EOARecipient(to).emit_transfer(value=amount)
 
     # =========================
     # DEAL FLOW
@@ -199,7 +175,7 @@ class DeferredValueSwap(gl.Contract):
         self._respect_delay(sender)
 
         if value <= 0:
-            raise UserError("Value must be > 0")
+            raise gl.vm.UserError("Value must be > 0")
 
         recipient = Address(recipient_hex)
         self._not_blacklisted(recipient)
@@ -207,19 +183,18 @@ class DeferredValueSwap(gl.Contract):
         sent = gl.message.value
         fee = self.base_activation_fee
         if sent < fee:
-            raise UserError("Sent value must cover base_activation_fee")
+            raise gl.vm.UserError("Sent value must cover base_activation_fee")
 
-        # deposit = whatever was sent minus the fee
         deposit = sent - fee
 
         if deposit == u256(0):
-            raise UserError("Deposit must be > 0")
+            raise gl.vm.UserError("Deposit must be > 0")
 
         if self.max_deal_value != u256(0) and deposit > self.max_deal_value:
-            raise UserError("Deposit exceeds max_deal_value")
+            raise gl.vm.UserError("Deposit exceeds max_deal_value")
 
         if fee > u256(0):
-            self.protocol_fees_collected += fee
+            self.protocol_fees_collected = self.protocol_fees_collected + fee
 
         deal_id = self.next_deal_id
         self.next_deal_id = deal_id + u256(1)
@@ -227,7 +202,7 @@ class DeferredValueSwap(gl.Contract):
 
         self.deal_sender[deal_id] = sender
         self.deal_recipient[deal_id] = recipient
-        self.deal_state[deal_id] = self._STATE_INACTIVE()
+        self.deal_state[deal_id] = u256(self.STATE_INACTIVE)
 
         self.deal_initial_value[deal_id] = deposit
         self.deal_current_value[deal_id] = self._calc_value(deposit)
@@ -254,14 +229,14 @@ class DeferredValueSwap(gl.Contract):
         self._respect_delay(gl.message.sender_address)
 
         state = self.deal_state.get(deal_id, u256(99))
-        if state != self._STATE_INACTIVE():
-            raise UserError("Deal not inactive")
+        if state != u256(self.STATE_INACTIVE):
+            raise gl.vm.UserError("Deal not inactive")
 
         deadline = self.deal_activation_deadline.get(deal_id, u256(0))
         if deadline != u256(0) and self._now() > deadline:
-            raise UserError("Activation deadline passed")
+            raise gl.vm.UserError("Activation deadline passed")
 
-        self.deal_state[deal_id] = self._STATE_ACTIVE()
+        self.deal_state[deal_id] = u256(self.STATE_ACTIVE)
         now = self._now()
         self.deal_activated_at[deal_id] = now
 
@@ -285,15 +260,15 @@ class DeferredValueSwap(gl.Contract):
         self._respect_delay(gl.message.sender_address)
 
         state = self.deal_state.get(deal_id, u256(99))
-        if state != self._STATE_INACTIVE():
-            raise UserError("Deal not inactive")
+        if state != u256(self.STATE_INACTIVE):
+            raise gl.vm.UserError("Deal not inactive")
 
         deposit = self.deal_deposit.get(deal_id, u256(0))
         if deposit > u256(0):
             self.deal_deposit[deal_id] = u256(0)
             self._send_native(self.deal_sender[deal_id], deposit)
 
-        self.deal_state[deal_id] = self._STATE_CANCELLED()
+        self.deal_state[deal_id] = u256(self.STATE_CANCELLED)
         self.deal_finalized_at[deal_id] = self._now()
 
     @gl.public.write
@@ -306,23 +281,23 @@ class DeferredValueSwap(gl.Contract):
         state = self.deal_state.get(deal_id, u256(99))
         now = self._now()
 
-        if state == self._STATE_INACTIVE():
+        if state == u256(self.STATE_INACTIVE):
             deadline = self.deal_activation_deadline.get(deal_id, u256(0))
             if deadline == u256(0) or now <= deadline:
-                raise UserError("Activation deadline not passed")
-        elif state == self._STATE_ACTIVE():
+                raise gl.vm.UserError("Activation deadline not passed")
+        elif state == u256(self.STATE_ACTIVE):
             deadline = self.deal_finalization_deadline.get(deal_id, u256(0))
             if deadline == u256(0) or now <= deadline:
-                raise UserError("Finalization deadline not passed")
+                raise gl.vm.UserError("Finalization deadline not passed")
         else:
-            raise UserError("Not expirable state")
+            raise gl.vm.UserError("Not expirable state")
 
         deposit = self.deal_deposit.get(deal_id, u256(0))
         if deposit > u256(0):
             self.deal_deposit[deal_id] = u256(0)
             self._send_native(self.deal_sender[deal_id], deposit)
 
-        self.deal_state[deal_id] = self._STATE_CANCELLED()
+        self.deal_state[deal_id] = u256(self.STATE_CANCELLED)
         self.deal_finalized_at[deal_id] = now
 
     # =========================
@@ -337,14 +312,14 @@ class DeferredValueSwap(gl.Contract):
         self._respect_delay(gl.message.sender_address)
 
         state = self.deal_state.get(deal_id, u256(99))
-        if state != self._STATE_ACTIVE():
-            raise UserError("Deal not active")
+        if state != u256(self.STATE_ACTIVE):
+            raise gl.vm.UserError("Deal not active")
 
         deadline = self.deal_finalization_deadline.get(deal_id, u256(0))
         if deadline != u256(0) and self._now() > deadline:
-            raise UserError("Finalization deadline passed")
+            raise gl.vm.UserError("Finalization deadline passed")
 
-        self.deal_state[deal_id] = self._STATE_FINAL_NFT()
+        self.deal_state[deal_id] = u256(self.STATE_FINAL_NFT)
         self.deal_nft_metadata[deal_id] = metadata
         self.deal_finalized_at[deal_id] = self._now()
 
@@ -360,29 +335,29 @@ class DeferredValueSwap(gl.Contract):
         self._respect_delay(gl.message.sender_address)
 
         state = self.deal_state.get(deal_id, u256(99))
-        if state != self._STATE_ACTIVE():
-            raise UserError("Deal not active")
+        if state != u256(self.STATE_ACTIVE):
+            raise gl.vm.UserError("Deal not active")
 
         deadline = self.deal_finalization_deadline.get(deal_id, u256(0))
         if deadline != u256(0) and self._now() > deadline:
-            raise UserError("Finalization deadline passed")
+            raise gl.vm.UserError("Finalization deadline passed")
 
         deposit = self.deal_deposit.get(deal_id, u256(0))
         if deposit == u256(0):
-            raise UserError("No active deposit")
+            raise gl.vm.UserError("No active deposit")
 
         current_value = self.deal_current_value.get(deal_id, u256(0))
         if current_value == u256(0):
-            raise UserError("No value to finalize")
+            raise gl.vm.UserError("No value to finalize")
 
         transform_fee = (current_value * self.transform_fee_bps) // u256(10_000)
         net_amount = current_value - transform_fee
 
         if net_amount > u256(0):
-            self.protocol_fees_collected += transform_fee
+            self.protocol_fees_collected = self.protocol_fees_collected + transform_fee
             self._send_native(self.deal_recipient[deal_id], net_amount)
 
-        self.deal_state[deal_id] = self._STATE_FINAL_STABLE()
+        self.deal_state[deal_id] = u256(self.STATE_FINAL_STABLE)
         self.deal_finalized_at[deal_id] = self._now()
 
         r = self.deal_recipient[deal_id]
@@ -404,11 +379,11 @@ class DeferredValueSwap(gl.Contract):
         self._respect_delay(gl.message.sender_address)
 
         state = self.deal_state.get(deal_id, u256(99))
-        if state != self._STATE_ACTIVE():
-            raise UserError("Deal not active")
+        if state != u256(self.STATE_ACTIVE):
+            raise gl.vm.UserError("Deal not active")
 
         if self.deal_dispute_open.get(deal_id, u256(0)) == u256(1):
-            raise UserError("Dispute already open")
+            raise gl.vm.UserError("Dispute already open")
 
         now = self._now()
         self.deal_dispute_open[deal_id] = u256(1)
@@ -418,7 +393,7 @@ class DeferredValueSwap(gl.Contract):
         if self.dispute_period_sec > u256(0):
             self.deal_claim_deadline[deal_id] = now + self.dispute_period_sec
 
-        self.deal_state[deal_id] = self._STATE_DISPUTED()
+        self.deal_state[deal_id] = u256(self.STATE_DISPUTED)
 
     @gl.public.write
     def challenge_dispute(self, deal_id_int: int, reason: str) -> None:
@@ -428,10 +403,10 @@ class DeferredValueSwap(gl.Contract):
         self._respect_delay(gl.message.sender_address)
 
         if self.deal_dispute_open.get(deal_id, u256(0)) != u256(1):
-            raise UserError("No open dispute")
+            raise gl.vm.UserError("No open dispute")
 
         if self.deal_challenge_by.get(deal_id) is not None:
-            raise UserError("Dispute already challenged")
+            raise gl.vm.UserError("Dispute already challenged")
 
         self.deal_challenge_by[deal_id] = gl.message.sender_address
         self.deal_challenge_reason[deal_id] = reason
@@ -441,17 +416,18 @@ class DeferredValueSwap(gl.Contract):
         deal_id = u256(deal_id_int)
         self._only_owner()
         state = self.deal_state.get(deal_id, u256(99))
-        if state != self._STATE_DISPUTED():
-            raise UserError("Not disputed")
+        if state != u256(self.STATE_DISPUTED):
+            raise gl.vm.UserError("Not disputed")
 
         self.deal_resolution_mode[deal_id] = u256(mode)
         self.deal_resolution_note[deal_id] = note
 
-        # Simple resolution: revert to sender
         deposit = self.deal_deposit.get(deal_id, u256(0))
         if deposit > u256(0):
+            self.deal_deposit[deal_id] = u256(0)
             self._send_native(self.deal_sender[deal_id], deposit)
-        self.deal_state[deal_id] = self._STATE_CANCELLED()
+
+        self.deal_state[deal_id] = u256(self.STATE_CANCELLED)
         self.deal_finalized_at[deal_id] = self._now()
 
     # =========================
@@ -505,7 +481,7 @@ class DeferredValueSwap(gl.Contract):
         sender = self.deal_sender.get(deal_id)
         recipient = self.deal_recipient.get(deal_id)
         if sender is None or recipient is None:
-            raise UserError("Deal not found")
+            raise gl.vm.UserError("Deal not found")
         return {
             "id": str(deal_id),
             "sender": str(sender),
