@@ -1,0 +1,59 @@
+{
+  "deployment": {
+    "tx_hash": "0x21d8032644c1cb184c0f1623986177e5ef556772c487f8eae350ea27fa9479e9",
+    "status": "FINALIZED",
+    "result": "SUCCESS"
+  },
+  "configuration": {
+    "fees": {
+      "activation_fee": "1000000000000000000",
+      "transform_fee_bps": 100,
+      "multiplier_bps": 10000
+    },
+    "timeouts": {
+      "activation_period": 0,
+      "finalization_period": 0,
+      "dispute_period": 600,
+      "min_delay": 0
+    }
+  },
+  "tests": [
+    {
+      "name": "happy_path",
+      "deal_id": 1,
+      "create_tx": "0x1dab056f2dc98b1466c5cbdaff47188fb7739e60a6a9cbb414876958f6bba59e",
+      "activate_tx": "0xf09f55674c7bf8613d5bfc6dccca2dd011ac01de8c1f62a8ee076cb892ffff11",
+      "finalize_tx": "0x9b20b32d8cf71f008f55a04d803512420b8e7f19b15a22bcb5e15c86e98e6c90",
+      "initial_value": "10000000000000000000",
+      "final_state": 3,
+      "status": "PASSED"
+    },
+    {
+      "name": "cancellation",
+      "deal_id": 2,
+      "create_tx": "0x8d49a7150691909e5338da457f2e6bb1db235c5e6ba45edb4eeead74d6cb67a1",
+      "cancel_tx": "0x7fc5d0e267fd531c1994a4749d4a76b66a662ee7a012f28d18c89d2ed85bc5e6",
+      "initial_value": "5000000000000000000",
+      "final_state": 4,
+      "status": "PASSED"
+    },
+    {
+      "name": "dispute_resolution",
+      "deal_id": 3,
+      "create_tx": "0xef79f49e76a626baf8acaa4830a1b31139ef0be19f5c851adf09e25ddccfb351",
+      "activate_tx": "0x59031e6806bb29a2f6a4cbb500b5811ad7911b391053efc2ef63267638a341c3",
+      "open_dispute_tx": "0x04a2e6ddc6f9a1ba15df9f8a52d1c16560e2ad652512a6e020d308aaf2e32425",
+      "challenge_tx": "0xa71953a51674f527055ad5c195d81b1730fa176818cd1cf995118e3439cdcf03",
+      "resolve_tx": "0xd51f968896b9cc25a0e916636854b93f98433d0336c10814d0e9c4bd296db70d",
+      "claim_reason": "freelancer did not deliver the work",
+      "challenge_reason": "work delivered, client confirmed on Slack",
+      "final_state": 4,
+      "status": "PASSED"
+    }
+  ],
+  "final_contract_stats": {
+    "owner": "0x3c163AeF7207dA6Dd839d839Ba1b7b068b128649",
+    "protocol_fees": "3100000000000000000",
+    "total_deals": 3
+  }
+}
