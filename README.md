@@ -1,210 +1,206 @@
-# GenLayer Quickstart: Deferred Value Swap with AI Conditions
+# DeferredValueSwap — GenLayer Intelligent Escrow Contract
 
-## Overview
+## Verification Status
 
-This quickstart shows how to build a **Deferred Value Swap** where execution depends on a condition evaluated later — simulating how GenLayer enables **AI-driven smart contract execution**.
+✅ Contract successfully deployed in GenLayer Studio
 
-By the end, you will:
+✅ Fee configuration verified
 
-* Deploy a contract
-* Create a deferred swap
-* Execute it based on a condition
+✅ Timeout configuration verified
+
+✅ Happy Path test passed
+
+✅ Cancellation test passed
+
+✅ Dispute Resolution test passed
+
+See:
+
+* TUTORIAL.md
+* TEST_REPORT.md
+* verification_results.json
 
 ---
 
-## What You’re Building
+# Overview
 
-A minimal system that:
+DeferredValueSwap is a GenLayer Intelligent Contract that enables trust-minimized escrow agreements between two parties.
 
-1. Locks ETH
-2. Stores a condition
-3. Evaluates it (mock AI)
-4. Executes only if valid
+The contract allows:
+
+* Creating escrow deals
+* Locking GEN deposits
+* Activating agreements
+* Releasing funds to recipients
+* Cancelling inactive deals
+* Opening disputes
+* Resolving disputes through contract governance
+
+The implementation has been deployed and tested on GenLayer Studio.
 
 ---
 
-## Quickstart (5 Minutes)
+# Repository Structure
 
-### 1. Clone & Build
-
-```bash
-git clone https://github.com/Biosolverr/contracts-DeferredValueSwap.py
-cd contracts-DeferredValueSwap.py
-forge build
+```text
+.
+├── contracts/
+│   └── DeferredValueSwap.py
+├── README.md
+├── TUTORIAL.md
+├── TEST_REPORT.md
+└── verification_results.json
 ```
 
 ---
 
-### 2. Run Local Node
+# Contract Lifecycle
 
-```bash
-anvil
+```text
+create_deal
+    │
+    ▼
+INACTIVE (0)
+    │
+    ├── cancel_inactive()
+    │       ▼
+    │   CANCELLED (4)
+    │
+    └── activate_deal()
+            ▼
+        ACTIVE (1)
+            │
+            ├── finalize_to_stable()
+            │       ▼
+            │   FINAL_STABLE (3)
+            │
+            └── open_dispute()
+                    ▼
+                DISPUTED (5)
+                    │
+                    └── resolve_dispute()
+                            ▼
+                        CANCELLED (4)
 ```
 
 ---
 
-### 3. Deploy Contract
+# Implemented Features
 
-```bash
-forge create src/DeferredValueSwap.sol:DeferredValueSwap \
-  --private-key <YOUR_PRIVATE_KEY> \
-  --rpc-url http://127.0.0.1:8545
-```
+## Escrow Creation
 
-Save the deployed contract address.
+A sender creates a deal and locks GEN inside the contract.
 
----
+## Deal Activation
 
-### 4. Create a Deferred Swap
+The recipient activates the agreement.
 
-```bash
-cast send <CONTRACT_ADDRESS> \
-  "createSwap(address,string)" \
-  <RECIPIENT_ADDRESS> "ALLOW" \
-  --value 1ether \
-  --private-key <YOUR_PRIVATE_KEY>
-```
+## Settlement
 
-What happens:
+Funds can be released to the recipient.
 
-* ETH is locked
-* Condition `"ALLOW"` is stored
-* Swap is pending
+## Cancellation
+
+Inactive deals can be cancelled and refunded.
+
+## Dispute Resolution
+
+Either party may open a dispute.
+
+Disputes can be resolved by the contract owner.
 
 ---
 
-### 5. Execute the Swap
+# Test Coverage
 
-```bash
-cast send <CONTRACT_ADDRESS> \
-  "executeSwap(uint256)" 0 \
-  --private-key <YOUR_PRIVATE_KEY>
-```
+## Test 1 — Happy Path
 
-If condition is valid:
-→ ETH is transferred
+Verified:
+
+* create_deal()
+* activate_deal()
+* finalize_to_stable()
+
+Result:
+
+* State 0 → 1 → 3
+* Recipient received payout
+
+Status:
+
+✅ PASSED
 
 ---
 
-## Smart Contract
+## Test 2 — Cancellation
 
-```solidity
-// SPDX-License-Identifier: MIT
-pragma solidity ^0.8.24;
+Verified:
 
-contract DeferredValueSwap {
+* create_deal()
+* cancel_inactive()
 
-    struct Swap {
-        address sender;
-        address recipient;
-        uint256 amount;
-        string condition;
-        bool executed;
-    }
+Result:
 
-    mapping(uint256 => Swap) public swaps;
-    uint256 public swapId;
+* State 0 → 4
 
-    function createSwap(address recipient, string memory condition) external payable {
-        require(msg.value > 0, "No ETH sent");
+Status:
 
-        swaps[swapId] = Swap({
-            sender: msg.sender,
-            recipient: recipient,
-            amount: msg.value,
-            condition: condition,
-            executed: false
-        });
+✅ PASSED
 
-        swapId++;
-    }
+---
 
-    function executeSwap(uint256 id) external {
-        Swap storage s = swaps[id];
+## Test 3 — Dispute Resolution
 
-        require(!s.executed, "Already executed");
-        require(_evaluateCondition(s.condition), "Condition not met");
+Verified:
 
-        s.executed = true;
-        payable(s.recipient).transfer(s.amount);
-    }
+* create_deal()
+* activate_deal()
+* open_dispute()
+* challenge_dispute()
+* resolve_dispute()
 
-    // Mock AI / GenLayer-style evaluation
-    function _evaluateCondition(string memory condition) internal pure returns (bool) {
-        return keccak256(bytes(condition)) == keccak256(bytes("ALLOW"));
-    }
+Result:
+
+* State 0 → 1 → 5 → 4
+
+Status:
+
+✅ PASSED
+
+---
+
+# Contract Statistics
+
+Verified after test execution:
+
+```json
+{
+  "protocol_fees": "3100000000000000000",
+  "total_deals": "3"
 }
 ```
 
 ---
 
-## How This Maps to GenLayer
+# Future Work
 
-In this tutorial:
+The current implementation uses manual dispute resolution.
 
-* Condition = string
-* Evaluation = mock function
-
-In GenLayer:
-
-* Condition → AI-readable input
-* Evaluation → off-chain inference
-* Execution → autonomous trigger
-
-This pattern demonstrates:
-→ **“execute when condition becomes true”**
+A future extension may introduce AI-assisted arbitration using GenLayer Equivalence Principle mechanisms while preserving deterministic consensus.
 
 ---
 
-## Upgrade to Real GenLayer Logic
+# Getting Started
 
-Replace:
-
-```solidity
-_evaluateCondition(...)
-```
-
-With:
-
-* AI oracle response
-* Off-chain inference result
-* GenLayer execution hook
+1. Open GenLayer Studio
+2. Create a Python Intelligent Contract
+3. Paste DeferredValueSwap.py
+4. Deploy the contract
+5. Follow TUTORIAL.md
+6. Review TEST_REPORT.md for verified execution results
 
 ---
 
-## Expected Result
+# License
 
-After running the steps:
-
-* Swap is created
-* Execution succeeds only if condition == `"ALLOW"`
-* Funds are transferred
-
----
-
-## Troubleshooting
-
-**Transaction fails?**
-
-* Check Anvil is running
-* Verify private key
-* Ensure contract address is correct
-
-**Execution fails?**
-
-* Condition must be `"ALLOW"`
-
----
-
-## Next Steps
-
-* Replace mock with oracle
-* Add time-based conditions
-* Integrate AI evaluation
-* Build autonomous agents
-
----
-
-## Repository
-
-https://github.com/Biosolverr/contracts-DeferredValueSwap.py
+MIT
