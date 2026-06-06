@@ -1,278 +1,376 @@
-DeferredValueSwap — AI-Powered Escrow on GenLayer
-Overview
+# DeferredValueSwap — AI-Powered Escrow on GenLayer
 
-This tutorial demonstrates how to build and test a Deferred Value Swap — an intelligent escrow system designed for AI-driven execution on GenLayer.
+A step-by-step implementation guide for building and deploying an intelligent escrow contract on GenLayer.
 
-It enables two parties to interact without trust:
+## What This Contract Does
 
-A client locks funds
-A freelancer completes work
-The contract enforces execution
-Disputes can be resolved (with future AI arbitration support)
-⚡ Quickstart (5 Minutes)
-Goal
+Two parties interact without needing to trust each other:
 
-Create a deal → activate it → finalize → recipient gets paid
+- A **client** locks funds into escrow
+- A **freelancer** completes work and claims payment
+- The contract enforces the rules deterministically
+- Disputes can be opened by either party and resolved by the contract owner (with AI arbitration planned for mode 2)
 
-Result: funds move from locked escrow → recipient
+---
 
-Step 1 — Create Deal
+## Contract Header (Required by GenVM)
 
-(Account A — client)
+The **first line** of every GenLayer contract must be a runner comment with the exact SDK hash. Using `latest` is not allowed in non-debug mode and will cause `invalid_contract absent_runner_comment`:
 
-recipient: address of B
-Value: 11 GEN
+```python
+# { "Depends": "py-genlayer:1jb45aa8ynh2a9c9xn3b7qqh8sm5q93hwfp7jqmwsfhh8jpz09h6" }
+```
 
-Result:
+This is equivalent to Solidity's `pragma solidity` — it pins the exact Python runtime version.
 
-10 GEN = deposit
-1 GEN = activation fee
-Step 2 — Activate Deal
+---
 
-(Account B — freelancer)
+## Full Contract Structure
 
-deal becomes ACTIVE
-Step 3 — Finalize
+```python
+# { "Depends": "py-genlayer:1jb45aa8ynh2a9c9xn3b7qqh8sm5q93hwfp7jqmwsfhh8jpz09h6" }
 
-(Account B)
+from genlayer import *
+import time
+import json
 
-Call:
 
-finalize_to_stable
-✅ Expected Result
-B receives ~9.9 GEN
-0.1 GEN goes to protocol fees
-Deal state = FINAL_STABLE (3)
-What You Are Building
+@gl.evm.contract_interface
+class _EOARecipient:
+    class View:
+        pass
+    class Write:
+        pass
 
-A full escrow system with:
 
-Deposits
-Activation flow
-Finalization
-Cancellation
-Dispute resolution
-🤖 AI / GenLayer Component
+class DeferredValueSwap(gl.Contract):
+    # Storage — all fields must be declared as class-level annotations
+    next_deal_id: u256
+    deal_sender: TreeMap[u256, Address]
+    deal_recipient: TreeMap[u256, Address]
+    deal_state: TreeMap[u256, u256]
+    deal_deposit: TreeMap[u256, u256]
+    deal_current_value: TreeMap[u256, u256]
+    # ... (full storage declaration in contract file)
 
-This contract is designed for AI-driven execution on GenLayer.
+    # State machine constants
+    STATE_INACTIVE   = 0
+    STATE_ACTIVE     = 1
+    STATE_FINAL_NFT  = 2
+    STATE_FINAL_STABLE = 3
+    STATE_CANCELLED  = 4
+    STATE_DISPUTED   = 5
+```
 
-It aligns with GenLayer principles:
+### Key implementation decisions
 
-Intelligent execution
-Off-chain reasoning
-AI-assisted decision workflows
-Current Implementation
-mode = 1 → manual dispute resolution
-Planned (GenLayer-native)
-mode = 2 → AI arbitration
-Off-chain inference decides outcome
-Autonomous execution via AI layer
-🧠 Why Python (GenLayer Advantage)
+**Why `@gl.evm.contract_interface` for transfers?**
 
-Unlike Solidity systems, this contract is written in Python.
+Senders and recipients are EOA wallets, not Intelligent Contracts. To send GEN to an EOA you must use an external message via the EVM interface. Using `gl.get_contract_at(addr).emit_transfer()` only works for IC→IC transfers and will silently fail for EOAs.
 
-This enables:
+```python
+# ❌ Wrong — only works IC→IC
+proxy = gl.get_contract_at(to)
+proxy.emit_transfer(value=amount)
 
-Easier AI integration
-Flexible condition logic
-Native compatibility with off-chain reasoning
-Future AI-driven execution
+# ✅ Correct — works for EOA/EVM addresses
+@gl.evm.contract_interface
+class _EOARecipient:
+    class View:
+        pass
+    class Write:
+        pass
 
-This is a key advantage of GenLayer’s execution model.
+def _send_native(self, to: Address, amount: u256) -> None:
+    if amount == u256(0):
+        return
+    _EOARecipient(to).emit_transfer(value=amount)
+```
 
-Deal Lifecycle
+**Why `gl.vm.UserError` instead of a custom exception class?**
 
-Each deal has a state:
+The original contract used a `try/except NameError` hack to define `UserError`. GenVM has its own error type that integrates with the consensus mechanism:
 
-State	Name	Description
-0	INACTIVE	Created but not activated
-1	ACTIVE	Work in progress
-2	FINAL_NFT	Completed without payout
-3	FINAL_STABLE	Completed with payout
-4	CANCELLED	Cancelled or refunded
-5	DISPUTED	Under dispute
-Flow
-create_deal
-    |
-INACTIVE ---(cancel_inactive)---> CANCELLED
-    |
-activate_deal
-    |
- ACTIVE ---(finalize_to_stable)---> FINAL_STABLE
-    |    ---(finalize_to_nft)------> FINAL_NFT
-    |    ---(open_dispute)----------> DISPUTED
-    |
- DISPUTED ---(resolve_dispute)-----> CANCELLED
-Setup (Owner)
+```python
+# ❌ Wrong
+try:
+    UserError
+except NameError:
+    class UserError(Exception):
+        pass
 
-Before running tests:
+# ✅ Correct
+raise gl.vm.UserError("Only owner")
+```
 
-set_fees
-Field	Value
-activation_fee	1 GEN
-transform_fee_bps	100 (1%)
-multiplier_bps	10000
-set_timeouts
-Field	Value
-activation_period	0
-finalization_period	0
-dispute_period	600 sec
-min_delay	0
-🧪 Test 1 — Happy Path
-Scenario
+**Why state constants as class attributes, not methods?**
 
-Client pays → freelancer completes → gets paid
+```python
+# ❌ Wrong — GenVM may expose these as public schema methods
+def _STATE_INACTIVE(self) -> u256:
+    return u256(0)
 
-Step 1 — create_deal (A)
-Value: 11 GEN
-offchain_ref: test_job_1
+# ✅ Correct — plain class attributes, not visible in schema
+STATE_INACTIVE = 0
+```
 
-Deposit:
+**Storage field types**
 
-10 GEN (after fee)
-Step 2 — activate_deal (B)
-Step 3 — finalize_to_stable (B)
-✅ Result
-B receives ~9.9 GEN
-Protocol gets 0.1 GEN
-state = 3 (FINAL_STABLE)
-🧪 Test 2 — Cancellation
-Scenario
+GenLayer enforces specific types for persistent storage:
 
-Client cancels before activation
+| Python type | GenLayer type |
+|-------------|---------------|
+| `int`       | `u256`, `u32`, etc. |
+| `list[T]`   | `DynArray[T]` |
+| `dict[K,V]` | `TreeMap[K,V]` |
 
-Step 1 — create_deal (A)
-Value: 6 GEN
-Step 2 — cancel_inactive (A)
-✅ Result
-A receives 5 GEN
-Fee not refunded
-state = 4 (CANCELLED)
-🧪 Test 3 — Dispute
-Scenario
+All persistent fields must be declared as **class-level annotations**, not created dynamically in `__init__` with `self.field = value`.
 
-Conflict between client and freelancer
+---
 
-Step 1 — create_deal (A)
-Value: 21 GEN
-Step 2 — activate_deal (B)
-Step 3 — open_dispute (A)
+## Deal Lifecycle
 
-Reason:
+```
+create_deal()
+    │
+    ▼
+INACTIVE (0)
+    │
+    ├─ cancel_inactive() ──────────────────► CANCELLED (4)
+    │
+    ▼
+activate_deal()
+    │
+    ▼
+ACTIVE (1)
+    │
+    ├─ finalize_to_stable() ───────────────► FINAL_STABLE (3)
+    ├─ finalize_to_nft() ─────────────────► FINAL_NFT (2)
+    └─ open_dispute() ────────────────────► DISPUTED (5)
+                                                │
+                                                ▼
+                                          resolve_dispute()
+                                                │
+                                                ▼
+                                          CANCELLED (4)
+```
 
-freelancer did not deliver the work
-Step 4 — challenge_dispute (B)
+---
 
-Reason:
+## Deploying in GenLayer Studio
 
-work delivered and client confirmed
-Step 5 — resolve_dispute (OWNER)
-mode = 1
-note = manual resolution (AI arbitration planned in mode=2)
-✅ Result
-20 GEN returned to A
-state = 4 (CANCELLED)
-Verifying Results
+### Step 0 — Verify the runner comment
 
-Call:
+The schema panel in Studio will show `invalid_contract` if the first line is wrong or missing. The correct header:
 
+```
+# { "Depends": "py-genlayer:1jb45aa8ynh2a9c9xn3b7qqh8sm5q93hwfp7jqmwsfhh8jpz09h6" }
+```
+
+### Step 1 — Deploy
+
+Load the contract file in Studio → Deploy. Constructor has no parameters.
+
+### Step 2 — Configure (owner account)
+
+Call `set_fees`:
+
+| Parameter | Value | Meaning |
+|-----------|-------|---------|
+| `activation_fee` | `1000000000000000000` | 1 GEN in wei |
+| `transform_fee_bps` | `100` | 1% payout fee |
+| `multiplier_bps` | `10000` | 1.0x (no multiplier) |
+
+Call `set_timeouts`:
+
+| Parameter | Value |
+|-----------|-------|
+| `activation_period` | `0` (no deadline) |
+| `finalization_period` | `0` (no deadline) |
+| `dispute_period` | `600` (10 minutes) |
+| `min_delay` | `0` |
+
+---
+
+## Test 1 — Happy Path
+
+**Goal:** client pays → freelancer completes → gets paid
+
+### create_deal (Account A)
+
+```
+recipient_hex: "0x<address_of_B>"
+value: 1
+offchain_ref: "test_job_1"
+Value sent: 11000000000000000000  (11 GEN in wei)
+```
+
+Result: 1 GEN activation fee collected, 10 GEN locked as deposit. Returns `deal_id = 1`.
+
+Verify with `get_deal_info(1)`:
+```json
+{
+  "state": "0",
+  "deposit": "10000000000000000000",
+  "sender": "0xA...",
+  "recipient": "0xB..."
+}
+```
+
+### activate_deal (Account B)
+
+```
+deal_id_int: 1
+```
+
+State changes from `0` (INACTIVE) → `1` (ACTIVE).
+
+### finalize_to_stable (Account B)
+
+```
+deal_id_int: 1
+```
+
+- `transform_fee` = 10 GEN × 1% = 0.1 GEN
+- `net_amount` sent to B = 9.9 GEN
+- Deal state → `3` (FINAL_STABLE)
+
+---
+
+## Test 2 — Cancellation
+
+### create_deal (Account A)
+
+```
+Value sent: 6000000000000000000  (6 GEN)
+```
+
+Deposit = 5 GEN (after 1 GEN fee).
+
+### cancel_inactive (Account A)
+
+5 GEN returned to A. State → `4` (CANCELLED). The activation fee is not refunded.
+
+---
+
+## Test 3 — Dispute Resolution
+
+### create_deal (Account A)
+
+```
+Value sent: 21000000000000000000  (21 GEN)
+```
+
+Deposit = 20 GEN.
+
+### activate_deal (Account B)
+
+### open_dispute (Account A)
+
+```
+deal_id_int: 3
+reason: "freelancer did not deliver the work"
+```
+
+State → `5` (DISPUTED).
+
+### challenge_dispute (Account B)
+
+```
+deal_id_int: 3
+reason: "work delivered, client confirmed on Slack"
+```
+
+### resolve_dispute (Owner)
+
+```
+deal_id_int: 3
+mode: 1
+note: "manual resolution — mode=2 will use AI arbitration"
+```
+
+20 GEN returned to A. State → `4` (CANCELLED).
+
+---
+
+## Verifying Results
+
+```python
 get_deal_info(deal_id)
-Expected
-Deal	State	Result
-1	3	Payment success
-2	4	Cancelled
-3	4	Dispute resolved
-Methods Overview
-Admin
-set_fees
-set_timeouts
-resolve_dispute
-User
-create_deal
-activate_deal
-finalize_to_stable
-cancel_inactive
-open_dispute
-challenge_dispute
-View
-get_deal_info
-get_stats
-get_contract_stats
-Known Fixes
+```
 
-During testing:
+| deal_id | Expected state | Meaning |
+|---------|---------------|---------|
+| 1 | `3` | FINAL_STABLE — payment sent |
+| 2 | `4` | CANCELLED |
+| 3 | `4` | Dispute resolved, refunded |
 
-Fixed missing UserError
-Removed invalid Address.ZERO usage
-Fixed deposit calculation logic
-Resolved fractional GEN issue
-🖥 Example Output (GenLayer Studio)
-After create_deal
-Tx Status: ACCEPTED
+```python
+get_contract_stats()
+# {"total_deals": "3", "protocol_fees": "1100000000000000000", "owner": "0x..."}
+```
 
-Method: create_deal
-Args:
-  recipient: 0xB...
-  value: 1
-  offchain_ref: test_job_1
+---
 
-Value Sent: 11 GEN
+## AI Arbitration — Future Work
 
-Result:
-  deal_id: 1
-  state: INACTIVE (0)
-  deposit: 10 GEN
-  activation_fee: 1 GEN
-After activate_deal
-Tx Status: ACCEPTED
+The contract has `deal_resolution_mode` storage for each deal:
 
-Method: activate_deal
-Args:
-  deal_id: 1
+- `mode = 1` → manual resolution by contract owner (current)
+- `mode = 2` → AI arbitration (planned)
 
-Result:
-  state: ACTIVE (1)
-  activated_by: 0xB...
-After finalize_to_stable
-Tx Status: ACCEPTED
+In mode 2, `resolve_dispute` would call an LLM via `gl.eq_principle` to read both `deal_claim_reason` and `deal_challenge_reason` and decide the outcome autonomously — without any human intervention. This is the core GenLayer value proposition: deterministic consensus over non-deterministic AI judgment.
 
-Method: finalize_to_stable
-Args:
-  deal_id: 1
+```python
+# Planned AI arbitration (mode 2)
+@gl.public.write
+def resolve_dispute_ai(self, deal_id_int: int) -> None:
+    claim = self.deal_claim_reason[deal_id]
+    challenge = self.deal_challenge_reason[deal_id]
 
-Result:
-  state: FINAL_STABLE (3)
-  payout_to: 0xB...
-  amount: 9.9 GEN
-  protocol_fee: 0.1 GEN
-📸 Optional Screenshot
+    def arbitrate() -> str:
+        result = gl.exec_prompt(
+            f"Claim: {claim}\nChallenge: {challenge}\n"
+            "Who is right? Reply SENDER or RECIPIENT."
+        )
+        return result.strip()
 
-You can include a real screenshot from GenLayer Studio:
+    verdict = gl.eq_principle.strict_eq(arbitrate)
+    # route funds based on verdict
+```
 
-![GenLayer Studio Result](./assets/genlayer-result.png)
+---
 
-Recommended:
+## Methods Reference
 
-create_deal transaction
-finalize_to_stable result
-get_deal_info output
-💡 Why This Matters
+| Category | Method | Who calls it |
+|----------|--------|-------------|
+| Admin | `set_fees` | Owner |
+| Admin | `set_timeouts` | Owner |
+| Admin | `blacklist` | Owner |
+| Admin | `set_limits` | Owner |
+| Admin | `resolve_dispute` | Owner |
+| User | `create_deal` | Client (payable) |
+| User | `activate_deal` | Either party |
+| User | `cancel_inactive` | Client only |
+| User | `expire_deal` | Either party |
+| User | `finalize_to_stable` | Recipient only |
+| User | `finalize_to_nft` | Recipient only |
+| User | `open_dispute` | Either party |
+| User | `challenge_dispute` | Either party |
+| View | `get_deal_info` | Anyone |
+| View | `get_stats` | Anyone |
+| View | `get_contract_stats` | Anyone |
 
-This tutorial demonstrates:
+---
 
-end-to-end reproducible execution
-escrow logic with deterministic states
-AI-ready architecture design
+## Implementation Bugs Fixed During Development
 
-This is a foundation for AI-powered execution systems on GenLayer.
-
-Conclusion
-
-You built an escrow system that:
-
-Locks value securely
-Executes conditionally
-Handles disputes
-Prepares for AI arbitration
-
-This is a real foundation for AI-powered contracts on GenLayer.
+| Bug | Symptom | Fix |
+|-----|---------|-----|
+| `# { "Depends": "py-genlayer:latest" }` | `absent_runner_comment` / `invalid_contract` in Studio | Replace with pinned hash |
+| Runner comment not on line 1 | Schema panel empty | Move comment to line 1, nothing before it |
+| `gl.get_contract_at(to).emit_transfer()` for EOA | Silent transfer failure | Use `@gl.evm.contract_interface` pattern |
+| Custom `UserError` class via `try/except NameError` | Errors not properly handled by GenVM | Use `gl.vm.UserError` |
+| State machine as `def _STATE_X(self)` methods | Schema parsing issues | Replace with class-level integer constants |
+| `self.protocol_fees_collected += fee` | Potential issue with storage `+=` | Rewrite as explicit `= self.x + fee` |
